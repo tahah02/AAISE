@@ -64,7 +64,7 @@ def test_crud_temp_db_schema(temp_db_session: Session):
     assert len(app_tables) == 22
 
     rev = temp_db_session.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert rev == "3d72e7ac452c"
+    assert rev == "b10e66e27a04"
 
 
 def test_crud_project_with_all_five_agent_configs(temp_db_session: Session):

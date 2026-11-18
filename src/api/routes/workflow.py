@@ -1,6 +1,7 @@
 from src.application.chat.chat_service import save_chat_message
 
 import re
+import logging
 
 import asyncio
 
@@ -21,6 +22,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     UploadFile,
     status,
 )
@@ -35,9 +37,13 @@ import pdfplumber
 
 from src.application.orchestration.orchestrator_service import OrchestratorService
 
-from src.domain.enums import ProjectStatus, RepositoryType
+from src.domain.enums import AgentType, ProjectStatus, RepositoryType
+
+from src.ports.llm_gateway import LLMRequest, LLMMessage
 
 from src.infrastructure.config import settings
+
+logger = logging.getLogger(__name__)
 
 from src.infrastructure.db.models import (
     HumanApprovalORM,
@@ -700,8 +706,260 @@ def handle_project_execution_intent(
         )
 
 
+def is_qa_explanation_query(user_text: str) -> bool:
+    t = user_text.strip().lower()
+    if not t or len(t) < 3:
+        return False
+
+    cleaned = t.rstrip("!.,? \t\n")
+    alpha_only = re.sub(r"[^a-zA-Z\s]", "", cleaned).strip()
+    if cleaned in GREETING_WORDS or alpha_only in GREETING_WORDS:
+        return False
+
+    if GIT_URL_REGEX.findall(user_text) or any(re.search(pat, user_text, re.IGNORECASE) for pat in RUN_PROJECT_PATTERNS):
+        return False
+
+    # Explicit build commands should never be treated as Q&A
+    imperative_build_starts = (
+        "build", "implement", "develop", "code ", "create app", "generate tdd", 
+        "start build", "proceed with build", "run workflow", "please implement"
+    )
+    if any(t.startswith(b) for b in imperative_build_starts) and not t.endswith("?"):
+        return False
+
+    qa_prefixes = (
+        "explain", "what is", "what does", "what are", "what's", "why is", "why does",
+        "why did", "why do", "how is", "how does", "how do", "how can", "how to",
+        "where is", "which ", "tell me", "describe", "clarify", "summarize",
+        "can you explain", "could you explain", "detail ", "help me understand",
+        "review", "analyse", "analyze", "check", "verify", "what about",
+        "is there", "are there", "does it", "can you", "could you", "would you",
+        "give me feedback", "feedback on", "walk me through", "overview of"
+    )
+    if any(t.startswith(p) for p in qa_prefixes):
+        return True
+
+    # Section / Point references: "point 9", "point no 5", "point number 5", "point #5", "section 4", etc.
+    if re.search(r"\b(point|section|clause|requirement|req|item|rule)\s*(no\.?|number|#)?\s*\d+\b", t, re.IGNORECASE):
+        return True
+
+    if "srs" in t and ("explain" in t or "tell" in t or "what" in t or "about" in t or "review" in t or "?" in t):
+        return True
+
+    # General questions ending with "?"
+    if t.endswith("?"):
+        return True
+
+    return False
+
+
+def is_explicit_build_command(user_text: str) -> bool:
+    if not user_text or not user_text.strip():
+        # Empty text with attached file defaults to implementing the specification
+        return True
+
+    t = user_text.strip().lower()
+
+    # If it matches Q&A query, it is NOT an explicit build command
+    if is_qa_explanation_query(user_text):
+        return False
+
+    # Default UI template strings count as explicit build
+    if "please implement the attached" in t or "implement the attached" in t:
+        return True
+
+    # If it ends with question mark and doesn't start with imperative build verbs
+    if t.endswith("?"):
+        return False
+
+    build_keywords = (
+        "build",
+        "implement",
+        "develop",
+        "generate tdd",
+        "generate spec",
+        "create app",
+        "start build",
+        "proceed with build",
+        "code this",
+        "run pipeline",
+        "start workflow",
+    )
+    return any(k in t for k in build_keywords)
+
+
+async def handle_qa_explanation_intent(
+    user_text: str,
+    project_id: str | None,
+    db: Session,
+    attached_context: str | None = None,
+) -> StartWorkflowResponse | None:
+    if not is_qa_explanation_query(user_text) and not attached_context:
+        return None
+
+    project = None
+    if project_id:
+        try:
+            p_uuid = uuid.UUID(project_id)
+            project = db.query(ProjectORM).filter_by(id=p_uuid).first()
+        except ValueError:
+            pass
+
+    if not project:
+        project = db.query(ProjectORM).order_by(ProjectORM.created_at.desc()).first()
+
+    context_text = ""
+    if project:
+        workspace_base = Path("workspace")
+        possible_tdd_paths = [
+            workspace_base / str(project.id) / "docs" / "TECHNICAL_DESIGN.md",
+            workspace_base / project.name / "docs" / "TECHNICAL_DESIGN.md",
+            workspace_base / "channel-app" / "docs" / "TECHNICAL_DESIGN.md",
+            workspace_base / "docs" / "TECHNICAL_DESIGN.md",
+            Path("docs/TECHNICAL_DESIGN.md"),
+        ]
+        for p in possible_tdd_paths:
+            if p.exists():
+                try:
+                    context_text = p.read_text(encoding="utf-8")[:6000]
+                    break
+                except Exception:
+                    pass
+
+        if not context_text:
+            for spec_p in [
+                workspace_base / str(project.id) / "docs" / "XUNIT_TEST_SPEC.md",
+                Path("docs/XUNIT_TEST_SPEC.md"),
+            ]:
+                if spec_p.exists():
+                    try:
+                        context_text = spec_p.read_text(encoding="utf-8")[:4000]
+                        break
+                    except Exception:
+                        pass
+
+    proj_name = project.name if project else "General Software Project"
+    target_fw = project.target_framework if project else "FastAPI / Clean Architecture"
+
+    if attached_context:
+        context_block = (
+            f"### Attached User Requirements / Specifications Document:\n{attached_context[:35000]}\n\n"
+        )
+    elif context_text:
+        context_block = (
+            f"### Authoritative Project Technical Design & Specifications:\n{context_text}\n\n"
+        )
+    else:
+        context_block = "No formal Technical Design Document has been compiled on disk yet for this project.\n\n"
+
+    qa_prompt = (
+        f"You are Agent 1 (Documentation Reviewer & Software Architect) for the Autonomous AI Software Engineer (AAISE) platform.\n"
+        f"The user is asking an architectural, requirements, or design question.\n\n"
+        f"Project: {proj_name}\n"
+        f"Target Framework: {target_fw}\n\n"
+        f"{context_block}"
+        f"User Query:\n{user_text}\n\n"
+        f"Instructions:\n"
+        f"- Provide a direct, thorough, technically rigorous answer in clean Markdown.\n"
+        f"- Reference specific sections, entities, endpoints, or requirements from the attached specifications if applicable.\n"
+        f"- Do NOT trigger a new build or ask to re-implement anything unless requested.\n"
+    )
+
+    try:
+        resolver = LLMProviderResolver()
+        cfg = resolver.resolve_agent_config(
+            session=db,
+            project_id=project.id if project else None,
+            agent=AgentType.DOC_REVIEWER,
+        )
+
+        req = LLMRequest(
+            provider=cfg.provider,
+            model=cfg.model,
+            fallback_provider=cfg.fallback_provider,
+            fallback_model=cfg.fallback_model,
+            messages=[
+                LLMMessage(role="system", content="You are Agent 1 (Documentation Reviewer & Software Architect) in AAISE."),
+                LLMMessage(role="user", content=qa_prompt),
+            ],
+            temperature=0.2,
+            max_tokens=2500,
+        )
+
+        resp = await cfg.adapter.complete(req)
+        reply = resp.content or "I reviewed your question regarding the specifications, but could not produce a detailed answer."
+
+        tracker = TokenTrackerService(db)
+        prompt_toks = resp.usage.prompt_tokens if resp.usage else 0
+        comp_toks = resp.usage.completion_tokens if resp.usage else 0
+        total_toks = resp.usage.total_tokens if resp.usage else 0
+        lat_ms = resp.latency_ms or 500
+        lat_sec = round(lat_ms / 1000.0, 1)
+        prov_str = resp.provider.value if hasattr(resp.provider, "value") else str(resp.provider)
+        is_local = "ollama" in prov_str.lower()
+        is_free = is_local or any(p in prov_str.lower() for p in ("gemini", "groq"))
+        cost_val = tracker.estimate_cost(prov_str, resp.model, prompt_toks, comp_toks) or 0.0
+        cost_lbl = "$0.00 (Local)" if is_local else ("$0.00 (Free Tier)" if is_free else f"${cost_val:.4f}")
+
+        telemetry = {
+            "totalTokens": total_toks,
+            "promptTokens": prompt_toks,
+            "completionTokens": comp_toks,
+            "latencyMs": lat_ms,
+            "latencySec": lat_sec,
+            "estimatedCostUsd": cost_val,
+            "costLabel": cost_lbl,
+            "provider": prov_str,
+            "model": resp.model,
+            "isFreeTier": is_free,
+            "displayBadge": f"⚡ {total_toks:,} tokens • {lat_sec}s • {cost_lbl} • {resp.model}",
+        }
+
+        if project:
+            save_chat_message(db, project.id, "user", user_text)
+            save_chat_message(
+                db,
+                project.id,
+                "agent1",
+                reply,
+                metadata={"telemetry": telemetry},
+            )
+
+        return StartWorkflowResponse(
+            project_id=project.id if project else None,
+            status="CONVERSATION",
+            message="Question answered by Agent 1.",
+            is_greeting=True,
+            assistant_reply=reply,
+        )
+
+    except Exception as e:
+        logger.error(f"Error handling Q&A query: {e}")
+        doc_note = (
+            "I reviewed your attached specifications document. Please let me know if you would like me to clarify specific sections, or type `build` to begin implementation."
+            if attached_context
+            else "You can review the full architecture in `docs/TECHNICAL_DESIGN.md` or ask specific questions about the API endpoints, database schema, or verification tests."
+        )
+        fallback_reply = (
+            f"### ℹ️ Agent 1 Specification Review\n\n"
+            f"I received your question: *\"{user_text}\"*\n\n"
+            f"{doc_note}"
+        )
+        if project:
+            save_chat_message(db, project.id, "user", user_text)
+            save_chat_message(db, project.id, "agent1", fallback_reply)
+
+        return StartWorkflowResponse(
+            project_id=project.id if project else None,
+            status="CONVERSATION",
+            message="Specification Q&A.",
+            is_greeting=True,
+            assistant_reply=fallback_reply,
+        )
+
+
 @router.post("/start", response_model=StartWorkflowResponse, status_code=status.HTTP_200_OK)
-def start_workflow_endpoint(
+async def start_workflow_endpoint(
     req: StartWorkflowRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -719,7 +977,12 @@ def start_workflow_endpoint(
     if exec_resp:
         return exec_resp
 
-    # 1. Conversational Greeting check
+    # 1. Conversational Q&A / SRS Explanation check
+    qa_resp = await handle_qa_explanation_intent(req.user_requirement, req.project_id, db)
+    if qa_resp:
+        return qa_resp
+
+    # 2. Conversational Greeting check
     if is_conversational_or_greeting(req.user_requirement):
         reply = (
             "Welcome to AAISE! 👋\n\n"
@@ -744,7 +1007,7 @@ def start_workflow_endpoint(
             assistant_reply=reply,
         )
 
-    # 2. Dynamic target framework detection
+    # 3. Dynamic target framework detection
 
     detected_framework = detect_target_framework(req.user_requirement)
 
@@ -816,10 +1079,11 @@ def start_workflow_endpoint(
     save_chat_message(db, project.id, "user", req.user_requirement)
 
     tdd_exists = (Path("./workspace") / str(project.id) / "docs" / "TECHNICAL_DESIGN.md").exists()
-    is_qa_or_sec_intent = any(
-        w in cleaned
-        for w in ["agent4", "agent 4", "qa", "test", "agent5", "agent 5", "security", "audit"]
-    )
+    qa_explicit_triggers = [
+        "agent4", "agent 4", "run qa", "start qa", "run blackbox", "black-box test",
+        "agent5", "agent 5", "run security", "security audit", "run sast", "audit code"
+    ]
+    is_qa_or_sec_intent = any(w in cleaned for w in qa_explicit_triggers)
 
     is_continue_or_approve = (
         cleaned
@@ -929,81 +1193,96 @@ async def start_workflow_multipart_endpoint(
 
             extracted_docs.append(f"### Document: {f.filename}\n\n{doc_text}")
 
-    full_requirement = user_requirement.strip()
+    user_prompt = user_requirement.strip() if user_requirement else ""
+    full_requirement = user_prompt
 
+    docs_block = None
     if extracted_docs:
         docs_block = "\n\n".join(extracted_docs)
-
         if full_requirement:
             full_requirement = f"{full_requirement}\n\n## Attached Specifications:\n\n{docs_block}"
-
         else:
             full_requirement = docs_block
-
-    # Check for Git Push Intent
-
-    git_push_resp = handle_git_push_intent(full_requirement, project_id, db)
-
-    if git_push_resp:
-        return git_push_resp
-
-    if not files and is_conversational_or_greeting(full_requirement):
-        reply = (
-            "Welcome to AAISE! 👋\n\n"
-            "Please upload your Software Requirements Specification (SRS) or describe the application "
-            "you want to build below. Our multi-agent engineering team will design, implement, test, and verify it for you."
-        )
-        if project_id:
-            try:
-                p_uuid = uuid.UUID(project_id)
-                proj = db.query(ProjectORM).filter_by(id=p_uuid).first()
-                if proj:
-                    save_chat_message(db, proj.id, "user", full_requirement)
-                    save_chat_message(db, proj.id, "assistant", reply)
-            except Exception:
-                pass
-
-        return StartWorkflowResponse(
-            project_id=uuid.UUID(project_id) if project_id else None,
-            status="CONVERSATION",
-            message="Greeting received.",
-            is_greeting=True,
-            assistant_reply=reply,
-        )
 
     detected_framework = detect_target_framework(full_requirement)
 
     project = None
-
     if project_id:
         try:
             p_uuid = uuid.UUID(project_id)
-
             project = db.query(ProjectORM).filter_by(id=p_uuid).first()
-
         except ValueError:
             pass
 
     if not project:
-        proj_name = project_name or (files[0].filename if files else "New Project")
+        base_name = None
+        if files and files[0].filename:
+            base_name = files[0].filename.rsplit(".", 1)[0]
+        proj_name = project_name or base_name or (user_prompt[:30].strip() if user_prompt else "Software Project")
 
         project = ProjectORM(
             name=proj_name,
             target_framework=detected_framework,
             status=ProjectStatus.ACTIVE.value,
         )
-
         db.add(project)
-
         db.commit()
-
     else:
-        project.target_framework = detected_framework
-
-        db.commit()
+        if detected_framework and detected_framework != project.target_framework:
+            project.target_framework = detected_framework
+            db.commit()
 
     from src.api.routes.projects import ensure_project_agent_configs
     ensure_project_agent_configs(project.id, db)
+
+    # Check for Git Push Intent
+    git_push_resp = handle_git_push_intent(user_prompt or full_requirement, str(project.id), db)
+    if git_push_resp:
+        return git_push_resp
+
+    # Check for Live Project Execution Intent (Run / Stop)
+    exec_resp = handle_project_execution_intent(user_prompt or full_requirement, str(project.id), db)
+    if exec_resp:
+        return exec_resp
+
+    # Check for Conversational Q&A / SRS Explanation intent
+    # If the user prompt is a Q&A query, explanation request, or question about the specifications/doc,
+    # or if files are attached and the user did NOT give an explicit build command,
+    # cater to the query conversationally using Agent 1 without creating TDD or test specs.
+    is_build = is_explicit_build_command(user_prompt)
+    is_qa = is_qa_explanation_query(user_prompt)
+
+    if (is_qa or (files and not is_build)) and user_prompt:
+        qa_resp = await handle_qa_explanation_intent(
+            user_text=user_prompt,
+            project_id=str(project.id),
+            db=db,
+            attached_context=docs_block,
+        )
+        if qa_resp:
+            return qa_resp
+
+    if not files:
+        qa_resp = await handle_qa_explanation_intent(full_requirement, str(project.id), db)
+        if qa_resp:
+            return qa_resp
+
+        if is_conversational_or_greeting(full_requirement):
+            reply = (
+                "Welcome to AAISE! 👋\n\n"
+                "Please upload your Software Requirements Specification (SRS) or describe the application "
+                "you want to build below. Our multi-agent engineering team will design, implement, test, and verify it for you."
+            )
+            save_chat_message(db, project.id, "user", full_requirement)
+            save_chat_message(db, project.id, "assistant", reply)
+
+            return StartWorkflowResponse(
+                project_id=project.id,
+                status="CONVERSATION",
+                message="Greeting received.",
+                is_greeting=True,
+                assistant_reply=reply,
+            )
 
     run = (
         db.query(WorkflowRunORM)
@@ -1152,7 +1431,24 @@ def resolve_approval_endpoint(
             if run:
                 run.status = "RUNNING"
 
-                run.current_phase = "DEVELOPMENT"
+                if resolved.gate_type == "SPECIFICATION":
+                    run.current_phase = "DEVELOPMENT"
+                    msg = "Specifications approved. Proceed with implementation."
+                elif resolved.gate_type == "MOCK_DEVELOPMENT":
+                    run.current_phase = "DEVELOPMENT"
+                    msg = "Mock Vendor API approved. Proceed with Channel Application implementation."
+                elif resolved.gate_type == "DEVELOPMENT":
+                    run.current_phase = "QA_VERIFICATION"
+                    msg = "Channel Application implementation approved. Proceed with QA contract testing."
+                elif resolved.gate_type == "QA_VERIFICATION":
+                    run.current_phase = "SECURITY_AUDIT"
+                    msg = "QA Verification approved. Proceed with Security SAST Audit."
+                elif resolved.gate_type == "SECURITY_AUDIT":
+                    run.current_phase = "RELEASE"
+                    msg = "Security Audit approved. Proceed with Release Promotion."
+                else:
+                    run.current_phase = "DEVELOPMENT"
+                    msg = f"{resolved.gate_type} approved. Proceeding."
 
                 db.commit()
 
@@ -1160,13 +1456,13 @@ def resolve_approval_endpoint(
                     db,
                     run.project_id,
                     "user",
-                    "Specifications approved. Proceed with full application implementation and build verification.",
+                    msg,
                 )
 
                 background_tasks.add_task(
                     _run_orchestrator_job,
                     run.project_id,
-                    "Specifications approved. Proceed with full application implementation and build verification.",
+                    msg,
                     run.id,
                 )
 
@@ -1175,33 +1471,31 @@ def resolve_approval_endpoint(
 
             if run:
                 run.status = "RUNNING"
-
-                run.current_phase = "SPECIFICATION"
-
+                run.current_phase = resolved.gate_type
                 db.commit()
 
                 feedback = (
                     req.comments or ""
-                ).strip() or "Please revise specifications according to requested changes."
+                ).strip() or "Please revise according to requested changes."
 
                 save_chat_message(
                     db,
                     run.project_id,
                     "user",
-                    f"Requested Changes to Specifications:\n{feedback}",
+                    f"Requested Changes for {resolved.gate_type}:\n{feedback}",
                 )
 
                 save_chat_message(
                     db,
                     run.project_id,
-                    "agent1",
-                    "Analyzing requested changes. Revising Technical Design Document (TDD) and Test Specifications...",
+                    "assistant",
+                    f"Analyzing requested changes for {resolved.gate_type}. Revising...",
                 )
 
                 background_tasks.add_task(
                     _run_orchestrator_job,
                     run.project_id,
-                    f"Please revise the technical design and test specifications according to the following changes requested by the reviewer:\n\n{feedback}",
+                    f"Please revise {resolved.gate_type} according to the following changes requested by the reviewer:\n\n{feedback}",
                     run.id,
                 )
 
@@ -1253,3 +1547,78 @@ async def stream_workflow_events(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/{run_id}/cancel", status_code=status.HTTP_200_OK)
+async def cancel_workflow_run(
+    run_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    run = db.query(WorkflowRunORM).filter_by(id=run_id).first()
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow run not found.")
+
+    run.status = "CANCELLED"
+    db.commit()
+
+    try:
+        from src.infrastructure.execution.process_manager import ProjectProcessManager
+        pm = ProjectProcessManager()
+        pm.stop_project(run.project_id, "channel-app")
+        pm.stop_project(run.project_id, "mock-vendor-api")
+    except Exception as e:
+        logger.warning(f"Error terminating project processes during cancel: {e}")
+
+    save_chat_message(
+        db,
+        run.project_id,
+        "assistant",
+        "⏹️ **Workflow Execution Stopped**: Multi-agent workflow execution was cancelled by user.",
+    )
+
+    return {
+        "status": "CANCELLED",
+        "message": "Workflow cancelled successfully.",
+        "workflow_run_id": str(run.id),
+        "project_id": str(run.project_id),
+    }
+
+
+@router.post("/cancel", status_code=status.HTTP_200_OK)
+async def cancel_workflow_for_project(
+    project_id: uuid.UUID = Query(...),
+    db: Session = Depends(get_db),
+):
+    run = (
+        db.query(WorkflowRunORM)
+        .filter_by(project_id=project_id)
+        .order_by(WorkflowRunORM.created_at.desc())
+        .first()
+    )
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No workflow run found for this project.")
+
+    run.status = "CANCELLED"
+    db.commit()
+
+    try:
+        from src.infrastructure.execution.process_manager import ProjectProcessManager
+        pm = ProjectProcessManager()
+        pm.stop_project(project_id, "channel-app")
+        pm.stop_project(project_id, "mock-vendor-api")
+    except Exception as e:
+        logger.warning(f"Error terminating project processes during cancel: {e}")
+
+    save_chat_message(
+        db,
+        project_id,
+        "assistant",
+        "⏹️ **Workflow Execution Stopped**: Multi-agent workflow execution was cancelled by user.",
+    )
+
+    return {
+        "status": "CANCELLED",
+        "message": "Workflow cancelled successfully.",
+        "workflow_run_id": str(run.id),
+        "project_id": str(project_id),
+    }

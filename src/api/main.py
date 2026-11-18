@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes.health import router as health_router
 from src.api.routes.projects import router as projects_router
 from src.api.routes.workflow import router as workflow_router
+from src.api.routes.analytics import router as analytics_router
 from src.infrastructure.config import settings
 from src.infrastructure.db.session import check_database_connection
 
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
     app.include_router(workflow_router, prefix="/api/v1")
+    app.include_router(analytics_router, prefix="/api/v1")
     return app
 
 

@@ -58,9 +58,36 @@ def test_create_project_with_agent_config(in_memory_session: Session):
     saved = in_memory_session.scalar(select(ProjectORM).where(ProjectORM.id == project_id))
     assert saved is not None
     assert saved.name == "Beneficiary Management System"
+    assert saved.created_date is not None
+    assert saved.created_by == "system"
+    assert saved.updated_date is not None
+    assert saved.updated_by == "system"
     assert len(saved.agent_configs) == 1
     assert saved.agent_configs[0].agent_type == "Agent 1: Documentation Reviewer"
     assert saved.agent_configs[0].is_enabled is True
+    assert saved.agent_configs[0].created_date is not None
+    assert saved.agent_configs[0].created_by == "system"
+
+
+def test_audit_columns_custom_actor_and_timestamp(in_memory_session: Session):
+    project_id = uuid.uuid4()
+    project = ProjectORM(
+        id=project_id,
+        name="Audited Project",
+        target_framework="python",
+        status="ACTIVE",
+        created_by="operator_taha",
+        updated_by="operator_taha",
+    )
+    in_memory_session.add(project)
+    in_memory_session.commit()
+
+    saved = in_memory_session.scalar(select(ProjectORM).where(ProjectORM.id == project_id))
+    assert saved is not None
+    assert saved.created_by == "operator_taha"
+    assert saved.updated_by == "operator_taha"
+    assert isinstance(saved.created_date, datetime)
+    assert isinstance(saved.updated_date, datetime)
 
 
 def test_project_cascade_delete(in_memory_session: Session):

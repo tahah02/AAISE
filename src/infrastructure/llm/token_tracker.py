@@ -85,3 +85,63 @@ class TokenTrackerService:
             self.db.flush()
 
         return invocation
+
+    def get_execution_telemetry(self, agent_execution_id: uuid.UUID | str | None) -> dict | None:
+        if not self.db or not agent_execution_id:
+            return None
+        try:
+            exec_id = agent_execution_id if isinstance(agent_execution_id, uuid.UUID) else uuid.UUID(str(agent_execution_id))
+            invocations = (
+                self.db.query(LLMInvocationORM)
+                .filter_by(agent_execution_id=exec_id)
+                .all()
+            )
+            if not invocations:
+                return None
+
+            total_prompt = 0
+            total_comp = 0
+            total_tokens = 0
+            total_latency_ms = 0
+            total_cost = 0.0
+            models_used: list[str] = []
+            providers_used: list[str] = []
+
+            for inv in invocations:
+                total_latency_ms += inv.latency_ms or 0
+                if inv.model_name and inv.model_name not in models_used:
+                    models_used.append(inv.model_name)
+                if inv.provider and inv.provider not in providers_used:
+                    providers_used.append(inv.provider)
+                if inv.token_usage:
+                    total_prompt += inv.token_usage.prompt_tokens or 0
+                    total_comp += inv.token_usage.completion_tokens or 0
+                    total_tokens += inv.token_usage.total_tokens or 0
+                    if inv.token_usage.estimated_cost_usd:
+                        total_cost += inv.token_usage.estimated_cost_usd
+
+            provider_name = providers_used[0] if providers_used else "gemini"
+            model_name = models_used[0] if models_used else "gemini-3.5-flash-lite"
+            latency_sec = round(total_latency_ms / 1000.0, 1)
+
+            # Determine free tier / local status
+            is_local = "ollama" in provider_name.lower()
+            is_free_tier = is_local or any(p in provider_name.lower() for p in ("gemini", "groq"))
+
+            cost_label = "$0.00 (Local)" if is_local else ("$0.00 (Free Tier)" if is_free_tier else f"${total_cost:.4f}")
+
+            return {
+                "totalTokens": total_tokens,
+                "promptTokens": total_prompt,
+                "completionTokens": total_comp,
+                "latencyMs": total_latency_ms,
+                "latencySec": latency_sec,
+                "estimatedCostUsd": round(total_cost, 6),
+                "costLabel": cost_label,
+                "provider": provider_name,
+                "model": model_name,
+                "isFreeTier": is_free_tier,
+                "displayBadge": f"⚡ {total_tokens:,} tokens • {latency_sec}s • {cost_label} • {model_name}",
+            }
+        except Exception:
+            return None

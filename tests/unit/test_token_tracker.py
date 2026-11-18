@@ -176,3 +176,46 @@ def test_record_failed_invocation_without_usage(db_session):
 
     usage = db_session.query(TokenUsageORM).filter_by(llm_invocation_id=inv.id).first()
     assert usage is None
+
+
+def test_get_execution_telemetry(db_session):
+    execution = db_session.query(AgentExecutionORM).first()
+    service = TokenTrackerService(db_session)
+
+    # 1. Non-existent returns None
+    assert service.get_execution_telemetry(uuid.uuid4()) is None
+    assert service.get_execution_telemetry(None) is None
+
+    # 2. Record two Gemini invocations
+    resp1 = LLMResponse(
+        provider=LLMProvider.GEMINI,
+        model="gemini-3.8-flash",
+        finish_reason="stop",
+        content="First response",
+        usage=TokenUsage(prompt_tokens=1000, completion_tokens=200, total_tokens=1200),
+        latency_ms=1500,
+    )
+    resp2 = LLMResponse(
+        provider=LLMProvider.GEMINI,
+        model="gemini-3.8-flash",
+        finish_reason="stop",
+        content="Second response",
+        usage=TokenUsage(prompt_tokens=800, completion_tokens=150, total_tokens=950),
+        latency_ms=1200,
+    )
+    service.record_invocation(execution.id, LLMProvider.GEMINI, "gemini-3.8-flash", 1500, True, resp1)
+    service.record_invocation(execution.id, LLMProvider.GEMINI, "gemini-3.8-flash", 1200, True, resp2)
+    db_session.commit()
+
+    telem = service.get_execution_telemetry(execution.id)
+    assert telem is not None
+    assert telem["totalTokens"] == 2150
+    assert telem["promptTokens"] == 1800
+    assert telem["completionTokens"] == 350
+    assert telem["latencyMs"] == 2700
+    assert telem["latencySec"] == 2.7
+    assert telem["costLabel"] == "$0.00 (Free Tier)"
+    assert telem["isFreeTier"] is True
+    assert telem["model"] == "gemini-3.8-flash"
+    assert "⚡ 2,150 tokens • 2.7s • $0.00 (Free Tier)" in telem["displayBadge"]
+

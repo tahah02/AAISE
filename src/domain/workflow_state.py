@@ -38,6 +38,14 @@ class WorkflowState(TypedDict, total=False):
     # Human-in-the-Loop Approval Gates
     spec_approved: bool
     spec_approval_comments: str | None
+    mock_approved: bool
+    mock_approval_comments: str | None
+    code_approved: bool
+    code_approval_comments: str | None
+    qa_approved: bool
+    qa_approval_comments: str | None
+    security_approved: bool
+    security_approval_comments: str | None
     release_approved: bool
     release_approval_comments: str | None
 

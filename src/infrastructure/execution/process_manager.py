@@ -89,6 +89,8 @@ class ProjectProcessManager:
     ) -> tuple[list[str], Path, int, str]:
         p_id = str(project_id)
         proj_dir = self.base_workspace_dir / p_id
+        if not proj_dir.exists() and (self.base_workspace_dir / "channel-app").exists():
+            proj_dir = self.base_workspace_dir
         framework_lower = (target_framework or "").lower()
 
         # Check frontend subsystem

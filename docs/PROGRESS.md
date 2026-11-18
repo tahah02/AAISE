@@ -17,6 +17,223 @@ Progress is tracked strictly through verifiable architectural milestones, not ar
 
 ---
 
+### [2026-11-18] Step 12: Next.js Observability & Telemetry Portal UI (Completed)
+- **Problem & Requirement**:
+  - The user requested a complete Next.js dashboard/portal to view platform token usage, estimated costs ($ USD), LLM latencies, Agent 4 QA black-box contract reports, Agent 5 security audits, and Human-in-the-Loop approval histories directly from `./data/aaise.db`.
+- **Implementation**:
+  - Created `frontend/components/AnalyticsDashboardModal.tsx`:
+    - Full-screen modal with 5 specialized tabs:
+      - **Executive Overview**: 5 KPI summary cards (Total Tokens with Prompt/Completion split, Cost in USD, Avg Latency, QA Pass Rate, Human Approvals count) plus Provider and Agent workload distribution cards.
+      - **Tokens & LLM Invocations**: Filterable, searchable table showing every LLM invocation, model, provider, tokens, latency, cost, agent, and timestamp.
+      - **QA Contract Reports**: Historical test run cards with expandable black-box contract tests (Test Key, HTTP method, endpoint, expected status, actual status code, latency, and response snippet).
+      - **Security Audit**: AST/SAST scanner statuses, findings by severity (Critical, High, Medium, Low), and remediation advice.
+      - **Human Approvals Log**: Complete audit trail of specification / deployment gate reviews, reviewer revision feedback, and approval statuses.
+    - Project selector dropdown ("All Projects" global view or project-specific filter) and live manual refresh.
+  - In `frontend/lib/api.ts`: Added typed interfaces and client methods (`fetchAnalyticsOverview`, `fetchAnalyticsTokens`, `fetchAnalyticsQAReports`, `fetchAnalyticsSecurity`, `fetchAnalyticsApprovals`).
+  - In `frontend/app/page.tsx`:
+    - Added an **Observability & Telemetry Portal** button in the left navigation bar.
+    - Added a **Telemetry & QA** button with live token counter pill in the top header bar.
+    - Added a new **Telemetry** tab in the right-hand inspection panel displaying live token metrics, costs, and quick access to the portal.
+    - Integrated live database fallback in the **Test Results** tab so historical SQLite test runs display automatically.
+- **Verification Evidence**:
+  - TypeScript compilation verified via `cmd /c "cd frontend && npx tsc --noEmit"` (0 errors).
+  - Pytest regression verified: `tests/unit/test_analytics.py` PASSED (1 passed in 0.72s).
+
+---
+
+### [2026-11-18] Step 11: Analytics & Telemetry Backend API for Portal (Completed)
+- **Problem & Requirement**:
+  - The SQLite database (`./data/aaise.db`) persists complete platform telemetry across `token_usage`, `llm_invocations`, `human_approvals`, `test_runs`, `test_results`, `security_scans`, and `security_findings`.
+  - A dedicated analytics backend API was required to power an enterprise-grade Next.js observability portal.
+- **Implementation**:
+  - Created `src/api/routes/analytics.py` with 5 high-performance endpoints supporting optional `?project_id=...` filtering:
+    - `GET /api/v1/analytics/overview`: Aggregates top-level KPI metrics (total projects, workflow runs, tokens consumed, prompt vs completion breakdown, estimated cost in USD, invocation count, average latency, QA test runs & pass rate, security scan statistics, and human approval counts).
+    - `GET /api/v1/analytics/tokens`: Groups token and cost consumption by LLM provider (Gemini, Groq, Ollama), model identifier, and agent role, plus the detailed chronological invocations log.
+    - `GET /api/v1/analytics/qa-reports`: Returns black-box contract test runs with nested test results (HTTP method, endpoint, expected vs actual status code, latency, and response bodies).
+    - `GET /api/v1/analytics/security`: Delivers AST/SAST security scan audits and vulnerability findings (severity, CWE/OWASP vulnerability type, file path, line numbers, remediation advice).
+    - `GET /api/v1/analytics/approvals`: Delivers the complete Human-in-the-Loop approval trail (gate type, status, prompt, reviewer comments, timestamps).
+  - In `src/api/main.py`: Registered `analytics_router` under prefix `/api/v1`.
+  - Added unit test suite in `tests/unit/test_analytics.py` verifying all routes against in-memory and SQLite schemas.
+- **Verification Evidence**:
+  - Verified live queries on `./data/aaise.db` via python test script:
+    - Overview: 5 projects, 3 runs, 117,813 tokens ($0.0167 USD), 14 invocations, 3 QA runs, 7 human approvals.
+  - Pytest verification: `tests/unit/test_analytics.py` PASSED (1 passed in 0.70s).
+  - Production app router registration verified.
+
+---
+
+### [2026-11-18] Step 10: Document Q&A Routing & Non-Invasive Requirements Ingestion (Completed)
+- **Problem Resolved**:
+  - Previously, when a user attached a document (e.g. `Student_Registration_SRS_v2_AAISE.pdf`) and asked a question or explanation query (e.g. *"Can you explain point no 5"*), the endpoint bypassed conversational Q&A because `if not files:` evaluated to `False` and concatenated 60k+ characters of document text into `full_requirement`. This caused the LangGraph central orchestrator to trigger a full build cycle, generating `TECHNICAL_DESIGN.md` and `XUNIT_TEST_SPEC.md`.
+- **Implementation**:
+  - In `src/api/routes/workflow.py`:
+    - Implemented `is_explicit_build_command(user_text: str) -> bool` to distinguish between genuine build commands (e.g. *"build"*, *"implement"*, *"generate tdd"*) and user inquiries/questions.
+    - Updated `is_qa_explanation_query(user_text: str)` to recognize point/section queries formatted as *"point no 5"*, *"point #5"*, *"point 5"*, and general questions ending with `?`.
+    - Enhanced `handle_qa_explanation_intent` to accept `attached_context: str | None = None`. When provided, Agent 1 (Documentation Reviewer & Software Architect) directly ingests the attached document text and produces an authoritative markdown explanation without compiling formal TDD or test specifications.
+    - Updated `start_workflow_multipart_endpoint` so that whenever files are uploaded, any user prompt that is a query/question or is not an explicit build directive is routed directly to `handle_qa_explanation_intent`.
+    - Returns `status="CONVERSATION"`, `is_greeting=True`, and `workflow_run_id=None`. Zero background orchestrator tasks are queued, ensuring zero TDD or test spec generation until the user explicitly commands a build.
+- **Live Verification**:
+  - Tested via live multipart HTTP POST to `http://127.0.0.1:8081/api/v1/workflow/start-multipart` with attached file and user requirement `"Can you explain point no 5"`.
+  - Live response verified: `status="CONVERSATION"`, `is_greeting=true`, `workflow_run_id=null`, with Agent 1 providing full detailed breakdown of point 5 directly from the document.
+  - Zero TDD and zero test specifications generated.
+  - Backend daemon restarted on port 8081.
+
+---
+
+### [2026-11-18] Step 9: Chat Query Responsiveness & UI Stop/Cancel Workflow (Completed)
+- **Conversational Intent Classification & Direct Q&A via Agent 1**:
+  - In `src/api/routes/workflow.py`: Implemented `is_qa_explanation_query(user_text)` and `handle_qa_explanation_intent(user_text, project_id, db)`:
+    - Accurately classifies user queries asking about specific requirements (e.g. *"explain point 9 of SRS"*, *"section 4 details"*), architecture, database schema, and test failures.
+    - Prevents these queries from triggering long-running build or multi-agent graph re-compilations.
+    - Directly retrieves project context from `docs/TECHNICAL_DESIGN.md` / `docs/XUNIT_TEST_SPEC.md` and routes to **Agent 1** (Documentation Reviewer & Software Architect) for an authoritative markdown answer.
+    - Emits authentic telemetry badges (`⚡ tokens`, `seconds`, `costLabel`) on Agent 1's Q&A response.
+- **Workflow Cancellation & Process Termination Endpoints**:
+  - In `src/api/routes/workflow.py`: Added `POST /api/v1/workflow/{run_id}/cancel` and `POST /api/v1/workflow/cancel?project_id=...`:
+    - Marks `WorkflowRunORM.status = "CANCELLED"`.
+    - Shuts down any active live execution processes for the project (`channel-app` or `mock-vendor-api`) via `ProjectProcessManager`.
+    - Emits a cancellation notification message to the chat history: `"⏹️ Workflow Execution Stopped: Multi-agent workflow execution was cancelled by user."`.
+- **Immediate State Graph Halting**:
+  - In `src/infrastructure/orchestration/graph_builder.py`: Injected `state.get("is_cancelled")` checks into all conditional routing edges (`route_entry`, `route_after_spec_approval`, `route_after_mock_approval`, `route_after_code_approval`, `route_after_qa_approval`, and `route_after_security_approval`), halting execution at `END` immediately when cancelled.
+  - In `src/application/orchestration/orchestrator_service.py`: Added `_is_run_cancelled()` checks inside `doc_node`, `mock_node`, `code_node`, `qa_node`, `sec_node`, and `release_node`.
+- **Interactive Stop / Cancel Button in UI**:
+  - In `frontend/lib/api.ts`: Added `cancelWorkflow({ runId, projectId })` API client function.
+  - In `frontend/app/page.tsx`:
+    - Added red **Stop** button with `Square` icon next to the Send button whenever `isSubmitting` is active.
+    - Added a **Stop** button badge in the center chat header whenever a workflow stream is active.
+    - Clicking Stop triggers immediate cancellation, resets submission spinners, and re-syncs chat history.
+- **Verification Evidence**:
+  - Authored comprehensive test suite in `tests/unit/test_workflow_qa_and_cancel.py`:
+    - `test_is_qa_explanation_query_classification`: PASSED.
+    - `test_handle_qa_explanation_intent_answers_without_triggering_build`: PASSED.
+    - `test_cancel_workflow_run_endpoint`: PASSED.
+    - `test_cancel_workflow_for_project_endpoint`: PASSED.
+    - `test_graph_builder_routes_halt_immediately_when_cancelled`: PASSED.
+    - All 5 unit tests passed in 4.33s.
+  - Graph builder regression suite: `13 passed in 0.44s`.
+  - Frontend typecheck verified via `npx tsc --noEmit` (0 errors).
+
+### [2026-11-18] Step 8: Token Consumption, Latency & Cost Tracing (Completed)
+- **Authentic Telemetry Extraction & Free Tier / Local Handling**:
+  - In `src/infrastructure/llm/token_tracker.py`: Implemented `get_execution_telemetry(agent_execution_id)` method aggregating authentic `prompt_tokens`, `completion_tokens`, `total_tokens`, and wall-clock latency in seconds.
+  - Accurately identifies zero-cost models and free tiers: Displays `$0.00 (Free Tier)` for Google Gemini and Groq, and `$0.00 (Local)` for Ollama, while computing fractional USD cost for paid commercial providers (e.g. OpenRouter/GPT).
+- **Multi-Agent Telemetry Emission**:
+  - In `src/application/orchestration/orchestrator_service.py`: Attached `telemetry` payload to message metadata across all 5 agent execution nodes (`agent1_node`, `mock_developer_node`, `code_node`, `qa_node`, and `sec_node`).
+- **Interactive Sleek Telemetry Badges in Frontend UI**:
+  - In `frontend/app/page.tsx`:
+    - Updated `ChatMessage` interface with typed `telemetry` field.
+    - Added dark telemetry pill badge at the bottom of agent message bubbles:
+      - `⚡ {totalTokens} tokens` badge with amber `Zap` icon.
+      - `{latencySec}s` latency badge with cyan `Clock` icon.
+      - `$0.00 (Free Tier)` or `$0.00 (Local)` badge with emerald pill for free/local models, blue for paid models.
+      - Truncated model identifier (e.g. `gemini-3.5-flash-lite`, `qwen2.5-coder:7b`).
+- **Verification Evidence**:
+  - Verified with real database records in SQLite (`llm_invocations` and `token_usage` tables).
+  - Authored and verified unit test suite in `tests/unit/test_token_tracker.py`: `test_get_execution_telemetry` passed (`5 passed in 0.67s`).
+  - Graph builder test suite: `13 passed in 0.59s`.
+  - Frontend typecheck verified via `npx tsc --noEmit` (0 errors).
+  - Dev servers running: FastAPI backend daemon and Next.js frontend dev server operational.
+
+### [2026-11-18] Step 7: Real-Time Live API Contract Runner & Clean Shutdown (Completed)
+- **Real-Time Live HTTP API Hits (No Mock/Simulation)**:
+  - In `src/application/agents/qa_engineer.py`: Implemented `_execute_live_http_tests` method. When runnable backend source code is detected, Agent 4 launches the service on an ephemeral free port via `ProjectProcessManager`.
+  - Probes live server readiness over HTTP (e.g. `/health`, `/swagger/v1/swagger.json`).
+  - Executes authentic HTTP calls (`GET`, `POST`, `PUT`, `DELETE`) via `httpx.AsyncClient`, recording real status codes, latency in milliseconds, payload sent, and actual response snippets.
+  - Generates copyable reproduction `curl` commands for every test case.
+- **Strict Clean Shutdown (Zero Orphaned Processes)**:
+  - Inside a strict `finally:` block in `_execute_live_http_tests`, `pm.stop_project(project_id, "channel-app")` is executed, terminating the process tree (`taskkill /F /T`) and freeing the port.
+- **Accurate QA Contract Report UI & Metadata**:
+  - In `src/application/orchestration/orchestrator_service.py`: Attached `qaReport` metadata payload to Agent 4 chat messages containing `testResults`, `passedCount`, `failedCount`, and `liveExecuted` flag.
+  - In `frontend/app/page.tsx`: Added rich interactive **QA Contract Test Report Card**:
+    - Status pills: Emerald `Passed` and Rose `Failed` counters.
+    - Full contract table: Status icons (`PASS`/`FAIL`), HTTP method badges (`POST`, `GET`, etc.), route path, expected vs actual status codes, and latency badges.
+    - Expandable dark code blocks with copyable `curl` reproduction snippets.
+- **Verification Evidence**:
+  - Authored and verified live HTTP execution & clean shutdown unit test: `test_qa_agent_executes_live_http_contract_testing_and_clean_shutdown` in `tests/unit/test_qa_engineer_agent.py`.
+  - All 5 QA engineer unit tests passed in 5.32s.
+  - Graph builder & approval engine tests: 16 passed in 0.82s.
+  - Frontend typecheck verified via `npx tsc --noEmit` (0 errors).
+  - FastAPI backend and Next.js frontend operational.
+
+### [2026-11-18] Step 6: Real Build Verification & Brutally Honest UI (Completed)
+- **Honest Status Reporting & Removal of Fake Green Checkmarks**:
+  - In `frontend/app/page.tsx`: Fixed checklist item rendering where items previously displayed a hardcoded green checkmark (`CheckCircle2`) even when text contained `"FAILED"` or `"compiler errors detected"`.
+  - Added dynamic contextual status evaluation: Red `XCircle` for errors/failures, Amber `AlertCircle` for warnings/repaired items, and Green `CheckCircle2` for verified passes.
+- **Sleek Dark Terminal Build Diagnostics UI**:
+  - In `frontend/app/page.tsx`: Created a dark terminal-style diagnostics card with monospaced code blocks, framework badge, and dynamic status pill:
+    - `[BUILD VERIFIED (0 ERRORS)]` (Emerald) for clean 1st-attempt builds.
+    - `[AUTO-REPAIRED (PASSED)]` (Amber/Emerald) for self-healed builds on attempt 2 or 3.
+    - `[BUILD FAILED]` (Red) with scrollable compiler diagnostics and error causes when compilation fails.
+- **Agent 3 Self-Healing & Repair Metadata Tracking**:
+  - In `src/application/agents/main_coder.py`: Enhanced iterative self-healing loop to track `attempts` and `was_repaired` in result metadata. On compiler errors, failure output is fed back to the LLM to auto-correct syntax or configuration issues.
+  - In `src/application/orchestration/orchestrator_service.py`: Emitted accurate chat messages distinguishing between clean passes, auto-repaired code, and compiler failures, attaching `buildInfo` payload for the frontend diagnostics card.
+- **Verification Evidence**:
+  - Tested self-healing pipeline via script: Injected broken syntax on attempt 1, verified compiler error was detected, passed back to LLM, repaired on attempt 2, and correctly tagged `attempts=2, was_repaired=True`.
+  - Frontend typecheck verified via `npx tsc --noEmit` (0 errors).
+  - Graph builder and approval engine tests: `16 passed in 1.11s`.
+  - Both Next.js frontend (port 8080) and FastAPI backend (port 8081) verified operational.
+
+### [2026-11-18] Step 5: Strict Iteration Cap (Max 2 Cycles) & Remediation Loop Bug Fix (Completed)
+- **Root Cause of Infinite Loop Identified & Resolved**:
+  - `defect_remediation_count` was resetting to `0` on every invocation of `start_workflow` in `orchestrator_service.py`, ignoring previous iterations.
+  - `WorkflowRunORM.iteration_count` was never persisted or synced during workflow loops.
+  - `graph_builder.py` evaluated `remediation_count < 3` instead of `< 2`, allowing 3 or more cycles.
+- **Strict Hard Cap Enforced at 2 Cycles**:
+  - In `src/infrastructure/orchestration/graph_builder.py`: Updated `route_after_qa_approval` and `remediate_defect_node` to enforce `remediation_count < 2`. After Attempt 2, the loop strictly breaks and terminates remediation.
+  - In `src/application/orchestration/orchestrator_service.py`: Initialized `defect_remediation_count` directly from `run.iteration_count or 0`, ensuring iteration progress survives session reloads, interruptions, and approval gates.
+  - Synchronized `run.iteration_count = remediation_count` in both `code_node` and `qa_node` to SQLite database.
+  - Added honest UI notification when remediation limit is hit: `"⛔ Maximum autonomous remediation cycles reached (2/2). Defect remediation halted to prevent infinite loop. Human review required."` with status `FAILED (REMEDIATION_EXHAUSTED)`.
+- **Verified via Unit Test**:
+  - Authored `test_remediation_loop_hard_cap_at_two_cycles` in `tests/unit/test_graph_builder.py`: Verified that across persistent defects, execution strictly terminates after exactly 2 remediation attempts (1 initial + 2 remediation cycles = exactly 3 coder runs, never 4+).
+  - All 16 unit tests passed in 1.12s.
+
+### [2026-11-18] Step 4: Human Approval Checkpoints After EVERY Active Agent (Completed)
+- **Domain & State Model Upgraded**:
+  - In `src/domain/enums.py`: Extended `ApprovalGateType` enum to include `SPECIFICATION`, `MOCK_DEVELOPMENT`, `DEVELOPMENT`, `QA_VERIFICATION`, and `SECURITY_AUDIT`.
+  - In `src/domain/workflow_state.py`: Added explicit approval tracking flags and comment fields (`mock_approved`, `mock_approval_comments`, `code_approved`, `code_approval_comments`, `qa_approved`, `qa_approval_comments`, `security_approved`, `security_approval_comments`).
+- **LangGraph Checkpoint Gates Implemented**:
+  - In `src/infrastructure/orchestration/graph_builder.py`: Registered discrete approval gate nodes (`spec_approval_gate`, `mock_approval_gate`, `code_approval_gate`, `qa_approval_gate`, `security_approval_gate`).
+  - Added conditional routing after every active agent. If human approval is pending (`False`), the graph immediately pauses at `END`. When approved, it proceeds dynamically to the next active agent.
+  - Added full gate pausing unit test suite (`test_pause_after_agent_1_doc_reviewer`, `test_pause_after_agent_2_mock_developer`, `test_pause_after_agent_3_main_coder`, `test_pause_after_agent_4_qa_engineer`, `test_pause_after_agent_5_security_reviewer`). All 12 graph builder tests passed in 0.55s.
+- **Orchestrator Approval Lifecycle**:
+  - In `src/application/orchestration/orchestrator_service.py`: Emits interactive approval cards to the chat feed and persists `HumanApprovalORM` entries at the end of each agent run (`Agent 1` $\rightarrow$ `Agent 2` $\rightarrow$ `Agent 3` $\rightarrow$ `Agent 4` $\rightarrow$ `Agent 5`).
+  - Restored runs load approval state dynamically from DB, ensuring fast-path execution through previously verified phases.
+- **Workflow API & Frontend Approval Interaction**:
+  - In `src/api/routes/workflow.py`: Updated `resolve_approval_endpoint` to support any gate type on approval and revision feedback loop.
+  - In `frontend/app/page.tsx`: Updated approval card rendering to dynamically show agent-specific prompt text and live status (`Revisions requested`, `Approved! Proceeding to next phase...`).
+  - Verified frontend with `npx tsc --noEmit` (0 errors).
+
+### [2026-11-18] Step 3: All 5 Agents Independent Toggleability (Completed)
+- **Removed Forced Mandatory Invariants**:
+  - In `src/api/routes/projects.py`: Updated `get_default_agent_specs()` so that `is_mandatory` is `False` for all 5 agents (Agent 1 through Agent 5).
+  - In `ensure_project_agent_configs()`: Removed forced `is_enabled = True` for mandatory agents, adding direct support for `agent1`, `agent2`, `agent3`, `agent4`, `agent5` toggle inputs.
+  - In `UpdateAgentsRequest` and `update_project_agents()`: Added `agent1_enabled` and `agent3_enabled` to payload schema and toggle application logic.
+  - In `_format_agents_response()`: Exposing `agent1`, `agent2`, `agent3`, `agent4`, `agent5` in returned `toggles` dictionary.
+- **Orchestrator Invariants Decoupled**:
+  - In `src/application/orchestration/orchestrator_service.py`: Removed hardcoded `enabled_map["AGENT_1"] = True` and `enabled_map["AGENT_3"] = True` overrides in `_get_enabled_agents`. All 5 agents respect database configurations.
+- **Dynamic LangGraph State Graph Routing**:
+  - In `src/infrastructure/orchestration/graph_builder.py`: Implemented conditional entry point (`route_entry`) that routes directly to the first active agent in sequence (e.g., skips Agent 1 if disabled, routing straight to Agent 2 or Agent 3).
+  - Configured conditional transition after `spec_approval_gate` and `mock_developer` to dynamically route around Agent 3 if disabled.
+  - Verified with new unit test suite: `test_skip_agent_1_doc_reviewer` and `test_skip_agent_3_main_coder` (`7 passed in 0.55s`).
+- **Frontend Full 5-Agent Toggle Support**:
+  - In `frontend/lib/api.ts`: Updated `ProjectAgentsResponse` and `updateProjectAgents` to include all 5 agents.
+  - In `frontend/components/AgentConfigModal.tsx`: Unlocked Agent 1 and Agent 3 toggles, replaced hardcoded "MANDATORY" badges with interactive toggle switches.
+  - In `frontend/app/page.tsx`: Updated header pill bar with interactive toggle buttons for all 5 agents (Agent 1, Agent 2, Agent 3, Agent 4, Agent 5).
+  - Verified frontend with `npx tsc --noEmit` (0 errors).
+  - Verified live API endpoints: `GET /api/v1/projects/{id}/agents` returns all 5 toggles; `PUT /api/v1/projects/{id}/agents` successfully updates Agent 1 and Agent 3 toggles.
+
+### [2026-11-18] Step 2: Remove Forced Git (Git 100% Optional via User URL) (Completed)
+- **Git Decoupled from Default Project Creation**: In `src/infrastructure/git/git_service.py`, `initialize_repository` now checks `self.is_git_enabled(project_id)`. Without a remote URL, zero `git init` or `git commit` commands run.
+- **Project ORM & API Enhanced**: Added `git_remote_url` to `ProjectORM`, `CreateProjectRequest`, and `ProjectItem`. Git is only activated if the user explicitly supplies a Git repository URL.
+- **Non-Destructive File Mode Fallbacks**: In `create_branch`, `commit_changes`, `get_current_commit_hash`, and `create_release_manifest`, operations safely fall back to clean file-mode handling without raising errors when `.git` is absent.
+- **Removed Forced Git in Agents**: Removed forced `git init` and `git commit` from `main_coder.py` and `mock_developer.py`.
+- **Verified**: Unit test suite `tests/unit/test_git_service.py` (12 passed in 5.44s) and remote push suites (7 passed in 5.80s) verified clean file mode execution.
+
+### [2026-11-18] Step 1: Database Audit Restructure & Migrations (Completed)
+- **`AuditModelMixin` Implemented**: Added to `src/infrastructure/db/models.py` providing `created_date`, `created_by`, `updated_date`, and `updated_by` with UTC defaults and auto-updating timestamps.
+- **ORM Models Updated**: Inherited `AuditModelMixin` across all 22 database tables with backwards-compatible `created_at` and `updated_at` synonyms.
+- **Alembic Migration Applied**: Generated and applied migration `b10e66e27a04_add_audit_tracking_columns.py` with SQLite batch operations and server defaults.
+- **Verified**: Confirmed all 22 database tables contain all 4 audit columns; unit tests in `tests/unit/test_orm_models.py` and `tests/integration/test_crud_operations.py` (16 passed in 1.32s) and API health tests (4 passed in 4.10s) verified.
+
 ### [2026-11-17] Universal Entity Synthesis & ASP.NET Core Runtime Stabilization (Completed)
 - **Universal Entity Synthesis**: Removed all hardcoded 'Student' domain assumptions from src/application/agents/main_coder.py, doc_reviewer.py, qa_engineer.py, and orchestrator_service.py. Agents dynamically derive domain entities directly from ingested requirement specifications.
 - **Swashbuckle Collision & ProblemDetails Fix**:

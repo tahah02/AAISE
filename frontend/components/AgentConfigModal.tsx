@@ -7,11 +7,13 @@ interface AgentConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
   agentToggles: {
+    agent1?: boolean;
     agent2: boolean;
+    agent3?: boolean;
     agent4: boolean;
     agent5: boolean;
   };
-  onSave: (newToggles: { agent2: boolean; agent4: boolean; agent5: boolean }) => void;
+  onSave: (newToggles: { agent1: boolean; agent2: boolean; agent3: boolean; agent4: boolean; agent5: boolean }) => void;
 }
 
 export function AgentConfigModal({
@@ -20,18 +22,30 @@ export function AgentConfigModal({
   agentToggles,
   onSave,
 }: AgentConfigModalProps) {
-  const [toggles, setToggles] = React.useState(agentToggles);
+  const [toggles, setToggles] = React.useState({
+    agent1: agentToggles.agent1 ?? true,
+    agent2: agentToggles.agent2 ?? true,
+    agent3: agentToggles.agent3 ?? true,
+    agent4: agentToggles.agent4 ?? true,
+    agent5: agentToggles.agent5 ?? true,
+  });
 
   // Sync state if modal reopens or props change
   const [prevToggles, setPrevToggles] = React.useState(agentToggles);
   if (prevToggles !== agentToggles) {
     setPrevToggles(agentToggles);
-    setToggles(agentToggles);
+    setToggles({
+      agent1: agentToggles.agent1 ?? true,
+      agent2: agentToggles.agent2 ?? true,
+      agent3: agentToggles.agent3 ?? true,
+      agent4: agentToggles.agent4 ?? true,
+      agent5: agentToggles.agent5 ?? true,
+    });
   }
 
   if (!isOpen) return null;
 
-  const handleToggle = (key: "agent2" | "agent4" | "agent5") => {
+  const handleToggle = (key: "agent1" | "agent2" | "agent3" | "agent4" | "agent5") => {
     setToggles((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
@@ -64,8 +78,8 @@ export function AgentConfigModal({
 
         {/* Modal Body / Agent List */}
         <div className="p-5 space-y-3.5 max-h-[65vh] overflow-y-auto">
-          {/* Agent 1 (Mandatory) */}
-          <div className="p-3 rounded-xl bg-[#090c14] border border-slate-800/80 flex items-center justify-between opacity-90">
+          {/* Agent 1 (Configurable) */}
+          <div className="p-3 rounded-xl bg-[#090c14] border border-slate-800 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="h-8 w-8 rounded-lg bg-emerald-950 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
                 <Bot className="h-4 w-4" />
@@ -73,12 +87,23 @@ export function AgentConfigModal({
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-[13px] font-medium text-slate-200">Agent 1: Documentation Reviewer</span>
-                  <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700">MANDATORY</span>
+                  <span className="text-[10px] bg-emerald-900/40 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30">CONFIGURABLE</span>
                 </div>
                 <p className="text-[11px] text-slate-500">Ingests requirements and creates technical specs & test specs (Google Gemini)</p>
               </div>
             </div>
-            <span className="text-[11px] font-semibold text-emerald-400">Enforced</span>
+            <button
+              onClick={() => handleToggle("agent1")}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                toggles.agent1 ? "bg-emerald-500" : "bg-slate-700"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                  toggles.agent1 ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
+            </button>
           </div>
 
           {/* Agent 2 (Configurable) */}
@@ -109,8 +134,8 @@ export function AgentConfigModal({
             </button>
           </div>
 
-          {/* Agent 3 (Mandatory) */}
-          <div className="p-3 rounded-xl bg-[#090c14] border border-slate-800/80 flex items-center justify-between opacity-90">
+          {/* Agent 3 (Configurable) */}
+          <div className="p-3 rounded-xl bg-[#090c14] border border-slate-800 flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="h-8 w-8 rounded-lg bg-blue-950 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
                 <Bot className="h-4 w-4" />
@@ -118,12 +143,23 @@ export function AgentConfigModal({
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-[13px] font-medium text-slate-200">Agent 3: Main Coding Agent</span>
-                  <span className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700">MANDATORY</span>
+                  <span className="text-[10px] bg-blue-900/40 text-blue-300 px-1.5 py-0.5 rounded border border-blue-500/30">CONFIGURABLE</span>
                 </div>
                 <p className="text-[11px] text-slate-500">Implements channel app business logic (Local Ollama qwen2.5-coder:7b)</p>
               </div>
             </div>
-            <span className="text-[11px] font-semibold text-blue-400">Enforced</span>
+            <button
+              onClick={() => handleToggle("agent3")}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                toggles.agent3 ? "bg-blue-500" : "bg-slate-700"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                  toggles.agent3 ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
+            </button>
           </div>
 
           {/* Agent 4 (Configurable) */}
@@ -187,7 +223,7 @@ export function AgentConfigModal({
         <div className="px-5 py-3 border-t border-slate-800 bg-[#0a0d15] flex items-center justify-between">
           <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
             <AlertCircle className="h-3.5 w-3.5" />
-            <span>Agent 1 & 3 are architectural invariants</span>
+            <span>All 5 agents can be toggled on or off independently</span>
           </div>
           <div className="flex items-center gap-2">
             <button

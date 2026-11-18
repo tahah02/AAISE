@@ -400,11 +400,6 @@ class MainCodingAgent(BaseAgent):
             target_repo_path = str(Path(context.workspace_path) / "frontend")
             Path(target_repo_path).mkdir(parents=True, exist_ok=True)
             branch_name = "main"
-            if not (Path(target_repo_path) / ".git").exists():
-                try:
-                    subprocess.run(["git", "init", "-b", "main"], cwd=target_repo_path, capture_output=True, timeout=15)
-                except Exception:
-                    pass
         else:
             target_repo_path = self.git_service.get_repository_path(
                 project_id=context.project_id,
@@ -521,15 +516,18 @@ class MainCodingAgent(BaseAgent):
         if not build_success:
             logger.error(f"Build gate failed after {max_healing_attempts} attempts. Output:\n{build_output}")
 
-        # Commit verified code to Git repository
+        # Commit verified code to Git repository if git is present
         if is_frontend:
-            try:
-                subprocess.run(["git", "add", "-A"], cwd=target_repo_path, capture_output=True, timeout=15)
-                subprocess.run(["git", "commit", "-m", "feat: scaffold frontend client interface"], cwd=target_repo_path, capture_output=True, timeout=15)
-                rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=target_repo_path, capture_output=True, text=True, timeout=15)
-                commit_hash = rev.stdout.strip()
-            except Exception:
-                commit_hash = "manual"
+            if (Path(target_repo_path) / ".git").exists():
+                try:
+                    subprocess.run(["git", "add", "-A"], cwd=target_repo_path, capture_output=True, timeout=15)
+                    subprocess.run(["git", "commit", "-m", "feat: scaffold frontend client interface"], cwd=target_repo_path, capture_output=True, timeout=15)
+                    rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=target_repo_path, capture_output=True, text=True, timeout=15)
+                    commit_hash = rev.stdout.strip()
+                except Exception:
+                    commit_hash = "FILE_SAVED"
+            else:
+                commit_hash = "FILE_SAVED"
         else:
             commit_hash = self.git_service.commit_changes(
                 project_id=context.project_id,
@@ -567,5 +565,7 @@ class MainCodingAgent(BaseAgent):
                 "files_count": len(written_files),
                 "build_success": build_success,
                 "build_log": build_output[:2000],
+                "attempts": attempt,
+                "was_repaired": (attempt > 1 and build_success),
             },
         )

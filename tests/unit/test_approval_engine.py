@@ -114,3 +114,38 @@ def test_human_revision_feedback_loops_back_to_agent_1():
     initial_state["spec_approved"] = True
     next_node_approved = route_after_spec_approval(initial_state)
     assert next_node_approved == "main_coder"
+
+
+def test_all_five_agent_approval_gates_sequence(db_session):
+    session, project, run = db_session
+    engine = ApprovalEngine(db=session)
+
+    gates = [
+        (ApprovalGateType.SPECIFICATION.value, "Review TDD and XUnit specs"),
+        (ApprovalGateType.MOCK_DEVELOPMENT.value, "Review Mock Vendor API"),
+        (ApprovalGateType.DEVELOPMENT.value, "Review Channel Application code"),
+        (ApprovalGateType.QA_VERIFICATION.value, "Review QA verification results"),
+        (ApprovalGateType.SECURITY_AUDIT.value, "Review Security SAST findings"),
+    ]
+
+    for gate_type, prompt in gates:
+        req = engine.create_approval_request(
+            workflow_run_id=run.id,
+            gate_type=gate_type,
+            prompt_text=prompt,
+        )
+        session.commit()
+
+        assert req.status == ApprovalStatus.PENDING.value
+        assert req.gate_type == gate_type
+
+        resolved = engine.resolve_approval(
+            approval_id=req.id,
+            approved=True,
+            reviewer_comments=f"Approved {gate_type}",
+        )
+        session.commit()
+
+        assert resolved.status == ApprovalStatus.APPROVED.value
+        assert resolved.reviewer_comments == f"Approved {gate_type}"
+

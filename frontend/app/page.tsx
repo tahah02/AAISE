@@ -62,6 +62,13 @@ import {
   Download,
   Square,
   ExternalLink,
+  XCircle,
+  Terminal,
+  AlertCircle,
+  Copy,
+  Zap,
+  Clock,
+  Activity,
 } from "lucide-react";
 
 import {
@@ -91,15 +98,20 @@ import {
   resolveApproval,
 
   subscribeToWorkflowStream,
+  cancelWorkflow,
   runProject,
   stopProject,
   fetchProjectStatus,
   ProjectItem,
   ArtifactItem,
-
+  fetchAnalyticsOverview,
+  fetchAnalyticsQAReports,
+  AnalyticsOverview,
+  AnalyticsQARunItem,
 } from "@/lib/api";
 
 import { AgentConfigModal } from "@/components/AgentConfigModal";
+import { AnalyticsDashboardModal } from "@/components/AnalyticsDashboardModal";
 
 
 
@@ -132,7 +144,48 @@ interface ChatMessage {
   status?: string;
 
   workingTasks?: string[];
-
+  buildInfo?: {
+    buildSuccess: boolean;
+    wasRepaired?: boolean;
+    attempts?: number;
+    framework?: string;
+    errorSummary?: string | null;
+  };
+  qaReport?: {
+    status: string;
+    passedCount: number;
+    failedCount: number;
+    totalCount: number;
+    liveExecuted?: boolean;
+    testResults: Array<{
+      testKey: string;
+      name: string;
+      category?: string;
+      httpMethod: string;
+      endpoint: string;
+      expectedStatus: number;
+      actualStatus: number;
+      latency: string;
+      status: string;
+      details: string;
+      curlCommand?: string;
+      requestPayload?: any;
+      responseBody?: string;
+    }>;
+  };
+  telemetry?: {
+    totalTokens: number;
+    promptTokens?: number;
+    completionTokens?: number;
+    latencyMs?: number;
+    latencySec: number;
+    estimatedCostUsd?: number;
+    costLabel: string;
+    provider?: string;
+    model: string;
+    isFreeTier?: boolean;
+    displayBadge?: string;
+  };
 }
 
 
@@ -149,7 +202,10 @@ export default function WorkspacePage() {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
-  const [activeTab, setActiveTab] = useState<"artifacts" | "diff" | "tests" | "security">("artifacts");
+  const [activeTab, setActiveTab] = useState<"artifacts" | "diff" | "tests" | "security" | "telemetry">("artifacts");
+  const [showAnalyticsModal, setShowAnalyticsModal] = useState(false);
+  const [liveQaRuns, setLiveQaRuns] = useState<AnalyticsQARunItem[]>([]);
+  const [quickTelemetry, setQuickTelemetry] = useState<AnalyticsOverview | null>(null);
 
   const [viewingFile, setViewingFile] = useState<{ path: string; content: string } | null>(null);
 
@@ -186,6 +242,7 @@ export default function WorkspacePage() {
   const [specApproved, setSpecApproved] = useState<boolean | null>(null);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isWorkflowRunning, setIsWorkflowRunning] = useState(false);
 
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
 
@@ -219,23 +276,25 @@ export default function WorkspacePage() {
 
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
 
-  const [activeNavView, setActiveNavView] = useState<"projects" | "agents" | "runs" | "artifacts" | "git">("projects");
+  const [activeNavView, setActiveNavView] = useState<"projects" | "agents" | "runs" | "artifacts" | "git" | "analytics">("projects");
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const chatInputRef = useRef<HTMLInputElement>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
 
 
-  // Dynamic project agents toggle states
+  // Dynamic project agents toggle states (All 5 agents independently toggleable)
   const [agentToggles, setAgentToggles] = useState({
+    agent1: true,
     agent2: true,
+    agent3: true,
     agent4: true,
     agent5: true,
   });
 
-  const handleToggleAgent = async (agentKey: "agent2" | "agent4" | "agent5") => {
+  const handleToggleAgent = async (agentKey: "agent1" | "agent2" | "agent3" | "agent4" | "agent5") => {
     const updated = { ...agentToggles, [agentKey]: !agentToggles[agentKey] };
     setAgentToggles(updated);
     if (selectedProject?.id) {
@@ -243,7 +302,7 @@ export default function WorkspacePage() {
     }
   };
 
-  const handleSaveModalToggles = async (newToggles: { agent2: boolean; agent4: boolean; agent5: boolean }) => {
+  const handleSaveModalToggles = async (newToggles: { agent1: boolean; agent2: boolean; agent3: boolean; agent4: boolean; agent5: boolean }) => {
     setAgentToggles(newToggles);
     if (selectedProject?.id) {
       await updateProjectAgents(selectedProject.id, newToggles);
@@ -281,6 +340,15 @@ export default function WorkspacePage() {
     }, 4000);
     return () => clearInterval(interval);
   }, [selectedProject?.id]);
+
+  useEffect(() => {
+    fetchAnalyticsOverview(selectedProject?.id).then((ov) => {
+      if (ov) setQuickTelemetry(ov);
+    });
+    fetchAnalyticsQAReports(selectedProject?.id).then((qa) => {
+      if (qa?.test_runs) setLiveQaRuns(qa.test_runs);
+    });
+  }, [selectedProject?.id, activeTab]);
 
   const handleRunProject = async () => {
     if (!selectedProject?.id || isStartingRun) return;
@@ -418,6 +486,12 @@ export default function WorkspacePage() {
         } else {
           setCurrentRunId(null);
         }
+        if (data && data.run_status === "RUNNING") {
+          setIsWorkflowRunning(true);
+          setStreamStatus("running");
+        } else {
+          setIsWorkflowRunning(false);
+        }
       }
     });
 
@@ -433,6 +507,17 @@ export default function WorkspacePage() {
     const interval = setInterval(() => {
       fetchProjectMessages(selectedProject.id).then((data) => {
         if (data) {
+          if (data.run_id) {
+            setCurrentRunId(data.run_id);
+          }
+          if (data.run_status === "RUNNING") {
+            setIsWorkflowRunning(true);
+            setStreamStatus((prev) => (prev === "idle" || prev === "ready" ? "running" : prev));
+          } else if (data.run_status === "COMPLETED" || data.run_status === "FAILED" || data.run_status === "CANCELLED") {
+            setIsWorkflowRunning(false);
+            setStreamStatus((prev) => (prev === "running" || prev === "streaming" ? "ready" : prev));
+          }
+
           if (data.messages && data.messages.length > 0) {
             setMessages((prev) => {
               if (prev.length > data.messages.length) {
@@ -569,6 +654,9 @@ export default function WorkspacePage() {
     const filesToSend = [...attachedFiles];
 
     setInputMessage("");
+    if (chatInputRef.current) {
+      chatInputRef.current.style.height = "auto";
+    }
 
     setAttachedFiles([]);
 
@@ -614,32 +702,32 @@ export default function WorkspacePage() {
 
 
 
-      // If response is a greeting / conversational reply:
-
+      // If response is a greeting / conversational reply / Q&A answer:
       if (resp.is_greeting && resp.assistant_reply) {
-
+        setIsSubmitting(false);
+        const activeProjId = selectedProject?.id || (resp.project_id ? String(resp.project_id) : null);
+        if (activeProjId) {
+          try {
+            const data = await fetchProjectMessages(activeProjId);
+            if (data && data.messages && data.messages.length > 0) {
+              setMessages(data.messages);
+              return;
+            }
+          } catch {
+            // fallback to local append
+          }
+        }
         setMessages((prev) => [
-
           ...prev,
-
           {
-
             id: `assistant-${Date.now()}`,
-
             sender: "assistant",
-
             senderName: "AAISE Assistant",
-
             timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-
             text: resp.assistant_reply,
-
           },
-
         ]);
-
         return;
-
       }
 
 
@@ -748,13 +836,38 @@ export default function WorkspacePage() {
 
   };
 
-
+  // Handle Workflow Cancellation (Stop Button)
+  const handleCancelWorkflow = async () => {
+    try {
+      if (currentRunId) {
+        await cancelWorkflow({ runId: currentRunId });
+      } else if (selectedProject?.id) {
+        await cancelWorkflow({ projectId: selectedProject.id });
+      }
+      setIsSubmitting(false);
+      setIsWorkflowRunning(false);
+      setStreamStatus("idle");
+      if (selectedProject?.id) {
+        const data = await fetchProjectMessages(selectedProject.id);
+        if (data && data.messages) {
+          setMessages(data.messages);
+        }
+      }
+    } catch (err: any) {
+      console.error("Failed to cancel workflow:", err);
+      setIsSubmitting(false);
+      setIsWorkflowRunning(false);
+    }
+  };
 
   // Handle Human Approval Gate (Approve)
 
   const handleApprove = async (overrideApprovalId?: string) => {
 
     setSpecApproved(true);
+    setIsSubmitting(true);
+    setIsWorkflowRunning(true);
+    setStreamStatus("running");
 
     const targetApprovalId = overrideApprovalId || activeApprovalId;
 
@@ -770,10 +883,8 @@ export default function WorkspacePage() {
 
         });
 
-      } catch (err) {
-
-        console.error("Approve failed:", err);
-
+      } catch (err: any) {
+        console.warn("Approve failed:", err?.message || err);
       }
 
     }
@@ -791,7 +902,7 @@ export default function WorkspacePage() {
         sender: "assistant",
         senderName: "AAISE Orchestrator",
         timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        text: "Specifications approved. Resuming Main Coding Agent (Agent 3)...",
+        text: "Approval granted. Resuming workflow execution...",
       },
     ]);
 
@@ -804,6 +915,9 @@ export default function WorkspacePage() {
   const handleRequestChanges = async () => {
 
     setSpecApproved(false);
+    setIsSubmitting(true);
+    setIsWorkflowRunning(true);
+    setStreamStatus("running");
 
     const feedback = feedbackInput.trim() || "Please revise specifications according to requested changes.";
 
@@ -849,10 +963,8 @@ export default function WorkspacePage() {
 
         });
 
-      } catch (err) {
-
-        console.error("Request changes failed:", err);
-
+      } catch (err: any) {
+        console.warn("Request changes failed:", err?.message || err);
       }
 
     }
@@ -1039,6 +1151,22 @@ export default function WorkspacePage() {
 
               <GitBranch className="h-4 w-4" />
 
+            </button>
+
+            {/* 6. Observability & Telemetry Portal */}
+            <button
+              onClick={() => {
+                setActiveNavView("analytics");
+                setShowAnalyticsModal(true);
+              }}
+              title="Observability & Telemetry Portal (SQLite Live)"
+              className={`h-10 w-10 rounded-lg flex items-center justify-center transition ${
+                showAnalyticsModal
+                  ? "bg-amber-600/20 text-amber-400 border border-amber-500/30"
+                  : "text-slate-400 hover:text-white hover:bg-slate-800/60"
+              }`}
+            >
+              <Activity className="h-4 w-4 text-amber-400" />
             </button>
 
           </nav>
@@ -1246,76 +1374,71 @@ export default function WorkspacePage() {
 
           <div className="flex items-center gap-3">
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
 
               <button
+                onClick={() => handleToggleAgent("agent1")}
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
+                  agentToggles.agent1
+                    ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300"
+                    : "bg-slate-900 border-slate-700 text-slate-500 line-through"
+                }`}
+                title="Agent 1: Documentation Reviewer"
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent1 ? "bg-emerald-400" : "bg-slate-600"}`} />
+                Agent 1 {agentToggles.agent1 ? "ON" : "OFF"}
+              </button>
 
+              <button
                 onClick={() => handleToggleAgent("agent2")}
-
-                className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border transition ${
-
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
                   agentToggles.agent2
-
-                    ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300"
-
+                    ? "bg-cyan-950/60 border-cyan-500/40 text-cyan-300"
                     : "bg-slate-900 border-slate-700 text-slate-500 line-through"
-
                 }`}
-
+                title="Agent 2: Mock Vendor API Developer"
               >
-
-                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent2 ? "bg-emerald-400" : "bg-slate-600"}`} />
-
+                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent2 ? "bg-cyan-400" : "bg-slate-600"}`} />
                 Agent 2 {agentToggles.agent2 ? "ON" : "OFF"}
-
               </button>
 
-
+              <button
+                onClick={() => handleToggleAgent("agent3")}
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
+                  agentToggles.agent3
+                    ? "bg-blue-950/60 border-blue-500/40 text-blue-300"
+                    : "bg-slate-900 border-slate-700 text-slate-500 line-through"
+                }`}
+                title="Agent 3: Main Coding Agent"
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent3 ? "bg-blue-400" : "bg-slate-600"}`} />
+                Agent 3 {agentToggles.agent3 ? "ON" : "OFF"}
+              </button>
 
               <button
-
                 onClick={() => handleToggleAgent("agent4")}
-
-                className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border transition ${
-
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
                   agentToggles.agent4
-
-                    ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300"
-
+                    ? "bg-purple-950/60 border-purple-500/40 text-purple-300"
                     : "bg-slate-900 border-slate-700 text-slate-500 line-through"
-
                 }`}
-
+                title="Agent 4: Independent QA Engineer"
               >
-
-                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent4 ? "bg-emerald-400" : "bg-slate-600"}`} />
-
+                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent4 ? "bg-purple-400" : "bg-slate-600"}`} />
                 Agent 4 {agentToggles.agent4 ? "ON" : "OFF"}
-
               </button>
 
-
-
               <button
-
                 onClick={() => handleToggleAgent("agent5")}
-
-                className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border transition ${
-
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
                   agentToggles.agent5
-
-                    ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300"
-
+                    ? "bg-amber-950/60 border-amber-500/40 text-amber-300"
                     : "bg-slate-900 border-slate-700 text-slate-500 line-through"
-
                 }`}
-
+                title="Agent 5: Security Reviewer"
               >
-
-                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent5 ? "bg-emerald-400" : "bg-slate-600"}`} />
-
+                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent5 ? "bg-amber-400" : "bg-slate-600"}`} />
                 Agent 5 {agentToggles.agent5 ? "ON" : "OFF"}
-
               </button>
 
 
@@ -1326,6 +1449,20 @@ export default function WorkspacePage() {
               >
                 <SettingsIcon className="h-3 w-3" />
                 Configure
+              </button>
+
+              <button
+                onClick={() => setShowAnalyticsModal(true)}
+                className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg bg-[#141b2a] border border-amber-500/40 text-amber-300 hover:bg-amber-950/40 text-[11px] font-medium transition shadow-sm"
+                title="AAISE Observability & Telemetry Portal (Live SQLite)"
+              >
+                <Activity className="h-3 w-3 text-amber-400" />
+                <span>Telemetry & QA</span>
+                {quickTelemetry && (
+                  <span className="font-mono text-[10px] text-slate-300 bg-amber-500/10 px-1.5 py-0.2 rounded border border-amber-500/20">
+                    {quickTelemetry.tokens.total.toLocaleString()} toks
+                  </span>
+                )}
               </button>
 
               {/* Live Project Runner Controls */}
@@ -1728,6 +1865,17 @@ export default function WorkspacePage() {
 
                 )}
 
+                {(isSubmitting || isWorkflowRunning || streamStatus === "streaming" || streamStatus === "running") && (
+                  <button
+                    onClick={handleCancelWorkflow}
+                    className="ml-2 flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[10.5px] bg-rose-500/20 border border-rose-500/50 text-rose-300 hover:bg-rose-500/30 transition font-medium cursor-pointer shadow-sm shadow-rose-950/40"
+                    title="Cancel active execution"
+                  >
+                    <Square className="h-2.5 w-2.5 fill-rose-300" />
+                    <span>Stop</span>
+                  </button>
+                )}
+
               </div>
 
               <button
@@ -1899,23 +2047,180 @@ export default function WorkspacePage() {
 
 
                         {m.checklist && (
-
-                          <div className="mt-3 space-y-1 text-[11.5px] text-slate-300">
-
-                            {m.checklist.map((item, idx) => (
-
-                              <div key={idx} className="flex items-center gap-2 text-emerald-400">
-
-                                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-
-                                <span>{item}</span>
-
-                              </div>
-
-                            ))}
-
+                          <div className="mt-3 space-y-1.5 text-[11.5px] text-slate-300">
+                            {m.checklist.map((item, idx) => {
+                              const itemLower = item.toLowerCase();
+                              const isFailure = itemLower.includes("failed") || itemLower.includes("error");
+                              const isWarning = itemLower.includes("warning") || itemLower.includes("repaired") || itemLower.includes("remed");
+                              return (
+                                <div
+                                  key={idx}
+                                  className={`flex items-start gap-2 ${
+                                    isFailure
+                                      ? "text-rose-400 font-medium"
+                                      : isWarning
+                                      ? "text-amber-300 font-medium"
+                                      : "text-emerald-400"
+                                  }`}
+                                >
+                                  {isFailure ? (
+                                    <XCircle className="h-3.5 w-3.5 shrink-0 text-rose-500 mt-0.5" />
+                                  ) : isWarning ? (
+                                    <AlertCircle className="h-3.5 w-3.5 shrink-0 text-amber-400 mt-0.5" />
+                                  ) : (
+                                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400 mt-0.5" />
+                                  )}
+                                  <span>{item}</span>
+                                </div>
+                              );
+                            })}
                           </div>
+                        )}
 
+                        {m.buildInfo && (
+                          <div className={`mt-3 rounded-xl border p-3.5 text-[12px] shadow-md transition-all ${
+                            m.buildInfo.buildSuccess
+                              ? m.buildInfo.wasRepaired
+                                ? "bg-[#181408] border-amber-500/40 text-amber-200 shadow-amber-950/20"
+                                : "bg-[#081710] border-emerald-500/40 text-emerald-200 shadow-emerald-950/20"
+                              : "bg-[#1c0a0a] border-rose-500/60 text-rose-200 shadow-rose-950/30"
+                          }`}>
+                            <div className="flex items-center justify-between font-mono text-[11px] mb-2 border-b pb-1.5 border-slate-700/50">
+                              <span className="font-semibold flex items-center gap-1.5 text-slate-300">
+                                <Terminal className="h-3.5 w-3.5 text-cyan-400" />
+                                Build Diagnostics &bull; {m.buildInfo.framework || "Compiler"}
+                              </span>
+                              <span className={`px-2 py-0.5 rounded font-bold text-[10px] tracking-wide uppercase ${
+                                m.buildInfo.buildSuccess
+                                  ? m.buildInfo.wasRepaired
+                                    ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                                    : "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                                  : "bg-rose-500/20 text-rose-300 border border-rose-500/30 animate-pulse"
+                              }`}>
+                                {m.buildInfo.buildSuccess
+                                  ? m.buildInfo.wasRepaired ? `Auto-Repaired (Attempt ${m.buildInfo.attempts || 2})` : "Build Verified (0 Errors)"
+                                  : `Build Failed (Attempt ${m.buildInfo.attempts || 1})`}
+                              </span>
+                            </div>
+                            {m.buildInfo.errorSummary ? (
+                              <div className="bg-black/60 rounded-lg p-2.5 text-rose-300 font-mono text-[11px] whitespace-pre-wrap overflow-x-auto max-h-48 scrollbar-thin scrollbar-thumb-rose-900 border border-rose-900/40 select-text leading-relaxed">
+                                {m.buildInfo.errorSummary}
+                              </div>
+                            ) : (
+                              <div className="text-[11.5px] text-emerald-300/80 font-mono flex items-center gap-1.5">
+                                <Check className="h-3 w-3 text-emerald-400" />
+                                Compilation succeeded with exit code 0. Zero compiler errors detected.
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {m.qaReport && (
+                          <div className={`mt-3 rounded-xl border p-4 text-[12px] shadow-lg transition-all ${
+                            m.qaReport.status === "PASSED"
+                              ? "bg-[#081710] border-emerald-500/40 text-emerald-100 shadow-emerald-950/20"
+                              : "bg-[#180a0a] border-rose-500/50 text-rose-100 shadow-rose-950/30"
+                          }`}>
+                            <div className="flex items-center justify-between mb-3 border-b pb-2 border-slate-700/50 font-mono text-[11px]">
+                              <div className="flex items-center gap-2">
+                                <FlaskConical className={`h-4 w-4 ${m.qaReport.status === "PASSED" ? "text-emerald-400" : "text-rose-400"}`} />
+                                <span className="font-semibold text-slate-200">
+                                  {m.qaReport.liveExecuted ? "Live HTTP Contract Test Report" : "Contract Specification Test Report"}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 text-[10px]">
+                                <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-bold">
+                                  {m.qaReport.passedCount} Passed
+                                </span>
+                                {m.qaReport.failedCount > 0 && (
+                                  <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 font-bold animate-pulse">
+                                    {m.qaReport.failedCount} Failed
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Test Results Table */}
+                            <div className="overflow-x-auto rounded-lg border border-slate-800 bg-black/40">
+                              <table className="w-full text-left font-mono text-[11px]">
+                                <thead>
+                                  <tr className="border-b border-slate-800 bg-slate-900/60 text-slate-400 text-[10px] uppercase tracking-wider">
+                                    <th className="py-2 px-2.5">Status</th>
+                                    <th className="py-2 px-2">Method</th>
+                                    <th className="py-2 px-2.5">Route</th>
+                                    <th className="py-2 px-2">Expected</th>
+                                    <th className="py-2 px-2">Actual</th>
+                                    <th className="py-2 px-2">Latency</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-800/60">
+                                  {m.qaReport.testResults.map((tr, idx) => {
+                                    const isPass = tr.status === "PASSED";
+                                    const methodColor =
+                                      tr.httpMethod === "POST" ? "bg-blue-500/20 text-blue-300 border-blue-500/30" :
+                                      tr.httpMethod === "GET" ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" :
+                                      tr.httpMethod === "DELETE" ? "bg-rose-500/20 text-rose-300 border-rose-500/30" :
+                                      "bg-amber-500/20 text-amber-300 border-amber-500/30";
+                                    return (
+                                      <React.Fragment key={idx}>
+                                        <tr className="hover:bg-slate-800/30 transition-colors">
+                                          <td className="py-2 px-2.5">
+                                            {isPass ? (
+                                              <span className="flex items-center gap-1 text-emerald-400 font-bold text-[10.5px]">
+                                                <CheckCircle2 className="h-3.5 w-3.5" />
+                                                PASS
+                                              </span>
+                                            ) : (
+                                              <span className="flex items-center gap-1 text-rose-400 font-bold text-[10.5px]">
+                                                <XCircle className="h-3.5 w-3.5" />
+                                                FAIL
+                                              </span>
+                                            )}
+                                          </td>
+                                          <td className="py-2 px-2">
+                                            <span className={`px-1.5 py-0.5 rounded text-[9.5px] font-bold border ${methodColor}`}>
+                                              {tr.httpMethod}
+                                            </span>
+                                          </td>
+                                          <td className="py-2 px-2.5 font-mono text-slate-200">
+                                            {tr.endpoint}
+                                          </td>
+                                          <td className="py-2 px-2 text-slate-400">
+                                            {tr.expectedStatus}
+                                          </td>
+                                          <td className={`py-2 px-2 font-bold ${isPass ? "text-emerald-400" : "text-rose-400"}`}>
+                                            {tr.actualStatus}
+                                          </td>
+                                          <td className="py-2 px-2 text-slate-400 text-[10px]">
+                                            {tr.latency}
+                                          </td>
+                                        </tr>
+                                        {tr.curlCommand && (
+                                          <tr className="bg-black/60">
+                                            <td colSpan={6} className="py-1.5 px-3 border-t border-slate-900">
+                                              <div className="flex items-center justify-between text-[10px] text-slate-400 mb-0.5">
+                                                <span>Reproduction curl:</span>
+                                                <button
+                                                  onClick={() => navigator.clipboard.writeText(tr.curlCommand || "")}
+                                                  className="hover:text-cyan-300 text-slate-400 flex items-center gap-1 transition-colors"
+                                                  title="Copy curl command"
+                                                >
+                                                  <Copy className="h-2.5 w-2.5" /> Copy
+                                                </button>
+                                              </div>
+                                              <code className="text-cyan-300/90 text-[10.5px] select-all break-all font-mono">
+                                                {tr.curlCommand}
+                                              </code>
+                                            </td>
+                                          </tr>
+                                        )}
+                                      </React.Fragment>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
                         )}
 
 
@@ -1938,6 +2243,29 @@ export default function WorkspacePage() {
 
                           </div>
 
+                        )}
+
+                        {m.telemetry && (
+                          <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center gap-2 font-mono text-[11px]">
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-amber-500/10 text-amber-300 border border-amber-500/25 font-semibold">
+                              <Zap className="h-3.5 w-3.5 text-amber-400 fill-amber-400/20" />
+                              <span>{m.telemetry.totalTokens.toLocaleString()} tokens</span>
+                            </span>
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-slate-800/80 text-slate-300 border border-slate-700/50">
+                              <Clock className="h-3 w-3 text-cyan-400" />
+                              <span>{m.telemetry.latencySec}s</span>
+                            </span>
+                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md border font-semibold ${
+                              m.telemetry.isFreeTier
+                                ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/25"
+                                : "bg-blue-500/10 text-blue-300 border-blue-500/25"
+                            }`}>
+                              <span>{m.telemetry.costLabel}</span>
+                            </span>
+                            <span className="text-[10px] text-slate-500 truncate max-w-[170px]" title={`${m.telemetry.provider || ''}: ${m.telemetry.model}`}>
+                              {m.telemetry.model}
+                            </span>
+                          </div>
                         )}
 
                       </div>
@@ -1965,34 +2293,18 @@ export default function WorkspacePage() {
 
 
 
-                          <p className="text-amber-100/90 text-[12.5px] mb-3 ml-8">
-
-                            Please review the technical design and test specifications.
-
-                            <br />
-
-                            Shall I proceed with the implementation?
-
+                          <p className="text-amber-100/90 text-[12.5px] mb-3 ml-8 whitespace-pre-wrap">
+                            {m.text || "Human approval required to proceed to the next phase. Shall I proceed?"}
                           </p>
 
-
-
                           {m.status === "REJECTED" ? (
-
                             <div className="flex items-center gap-2 text-amber-400 text-[12px] font-medium ml-8">
-
-                              <RotateCcw className="h-4 w-4" /> Revisions requested. Agent 1 is updating the specifications...
-
+                              <RotateCcw className="h-4 w-4" /> Revisions requested. Resuming agent to revise...
                             </div>
-
                           ) : m.isApproved || m.status === "APPROVED" ? (
-
                             <div className="flex items-center gap-2 text-emerald-400 text-[12px] font-medium ml-8">
-
-                              <Check className="h-4 w-4" /> Specs approved! Main Coder (Agent 3) resumed.
-
+                              <Check className="h-4 w-4" /> Approved! Proceeding to next phase...
                             </div>
-
                           ) : (
 
                             <div className="flex items-center gap-3 ml-8">
@@ -2192,30 +2504,28 @@ export default function WorkspacePage() {
 
               >
 
-                <input
-
+                <textarea
                   ref={chatInputRef}
-
-                  type="text"
-
                   value={inputMessage}
-
-                  onChange={(e) => setInputMessage(e.target.value)}
-
+                  onChange={(e) => {
+                    setInputMessage(e.target.value);
+                    e.target.style.height = "auto";
+                    e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                  rows={1}
                   placeholder={
-
                     attachedFiles.length > 0
-
                       ? "Add notes or prompt for the attached document..."
-
                       : "Describe your software project, or say 'Hi'..."
-
                   }
-
-                  disabled={isSubmitting}
-
-                  className="w-full bg-transparent text-[13px] text-slate-200 placeholder:text-slate-600 focus:outline-none px-2 py-1 disabled:opacity-50"
-
+                  disabled={isSubmitting || isWorkflowRunning}
+                  className="w-full bg-transparent text-[13px] text-slate-200 placeholder:text-slate-600 focus:outline-none px-2 py-1 disabled:opacity-50 resize-none min-h-[32px] max-h-44 overflow-y-auto leading-relaxed"
                 />
 
 
@@ -2376,17 +2686,29 @@ export default function WorkspacePage() {
 
 
 
+                  {(isSubmitting || isWorkflowRunning || streamStatus === "streaming" || streamStatus === "running") && (
+                    <button
+                      type="button"
+                      onClick={handleCancelWorkflow}
+                      title="Stop / Cancel running workflow execution"
+                      className="h-7 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 text-white flex items-center gap-1.5 transition text-[11px] font-medium shadow-md shadow-rose-950/40 border border-rose-500/50 cursor-pointer shrink-0"
+                    >
+                      <Square className="h-3 w-3 fill-white" />
+                      <span>Stop</span>
+                    </button>
+                  )}
+
                   <button
 
                     type="submit"
 
-                    disabled={isSubmitting || (!inputMessage.trim() && attachedFiles.length === 0)}
+                    disabled={isSubmitting || isWorkflowRunning || (!inputMessage.trim() && attachedFiles.length === 0)}
 
                     className="h-7 w-7 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 text-white flex items-center justify-center transition shadow-md shadow-blue-600/30"
 
                   >
 
-                    {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    {isSubmitting || isWorkflowRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
 
                   </button>
 
@@ -2505,6 +2827,26 @@ export default function WorkspacePage() {
                 >
 
                   Security
+
+                </button>
+
+                <button
+
+                  onClick={() => setActiveTab("telemetry")}
+
+                  className={`px-3 py-1.5 rounded-md font-medium transition ${
+
+                    activeTab === "telemetry"
+
+                      ? "bg-[#141b2b] text-amber-400 border border-amber-500/30"
+
+                      : "text-slate-400 hover:text-slate-200"
+
+                  }`}
+
+                >
+
+                  Telemetry
 
                 </button>
 
@@ -2691,6 +3033,57 @@ export default function WorkspacePage() {
                   const qaMsgs = messages.filter((m) => m.sender === "agent4" || (m.text && m.text.includes("Independent QA Test Report")));
 
                   if (qaMsgs.length === 0) {
+                    if (liveQaRuns.length > 0) {
+                      const latestRun = liveQaRuns[0];
+                      const isFailed = latestRun.status === "FAILED";
+                      return (
+                        <div className="space-y-3">
+                          <div className="p-3 rounded-xl bg-[#101422] border border-purple-500/40 space-y-2">
+                            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                              <span className="font-semibold text-purple-400 flex items-center gap-1.5 text-xs">
+                                <FlaskConical className="h-4 w-4" /> Agent 4 QA Contract Run (SQLite)
+                              </span>
+                              <span className={`text-[10px] border px-2 py-0.5 rounded-full font-bold ${
+                                isFailed ? "text-rose-400 bg-rose-950/60 border-rose-500/30" : "text-emerald-400 bg-emerald-950/60 border-emerald-500/30"
+                              }`}>
+                                {latestRun.status}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-400 flex items-center justify-between">
+                              <span>Type: <strong className="text-slate-200">{latestRun.execution_type}</strong></span>
+                              <span>{latestRun.passed_count} Passed / {latestRun.failed_count} Failed</span>
+                            </div>
+                            <div className="space-y-1.5 pt-1 max-h-60 overflow-y-auto">
+                              {latestRun.results.map((res) => (
+                                <div key={res.id} className="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] font-mono flex items-center justify-between">
+                                  <div className="flex items-center gap-1.5 truncate max-w-[200px]">
+                                    <span className="text-cyan-400 font-bold">{res.test_key}</span>
+                                    <span className="text-slate-400">[{res.http_method}]</span>
+                                    <span className="text-slate-300 truncate">{res.endpoint}</span>
+                                  </div>
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <span className={res.status === "PASSED" ? "text-emerald-400" : "text-rose-400 font-bold"}>
+                                      {res.actual_status_code}
+                                    </span>
+                                    <span className={`text-[9px] px-1 rounded ${res.status === "PASSED" ? "bg-emerald-950 text-emerald-400" : "bg-rose-950 text-rose-400"}`}>
+                                      {res.status}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setShowAnalyticsModal(true)}
+                              className="w-full mt-2 py-1.5 px-3 rounded bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 text-purple-300 text-[11px] font-semibold flex items-center justify-center gap-1.5 transition"
+                            >
+                              <Activity className="h-3 w-3" />
+                              View All Historical QA Reports in Portal ↗
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
 
                     return (
 
@@ -2812,7 +3205,7 @@ export default function WorkspacePage() {
 
                 })()
 
-              ) : (
+              ) : activeTab === "security" ? (
 
                 (() => {
 
@@ -2875,7 +3268,80 @@ export default function WorkspacePage() {
 
                 })()
 
-              )}
+              ) : activeTab === "telemetry" ? (
+                (() => {
+                  return (
+                    <div className="space-y-4">
+                      <div className="p-4 rounded-xl bg-[#101422] border border-amber-500/30 space-y-3">
+                        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                          <span className="font-semibold text-amber-400 flex items-center gap-1.5 text-xs">
+                            <Zap className="h-4 w-4" /> Live LLM & System Telemetry
+                          </span>
+                          <span className="text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/30 px-2 py-0.5 rounded-full font-mono">
+                            SQLite ./data/aaise.db
+                          </span>
+                        </div>
+
+                        {quickTelemetry ? (
+                          <div className="space-y-3 font-sans text-xs">
+                            <div className="grid grid-cols-2 gap-2 font-mono">
+                              <div className="p-2.5 rounded bg-slate-900/80 border border-slate-800">
+                                <div className="text-[10px] text-slate-400 uppercase font-sans">Total Tokens</div>
+                                <div className="text-base font-bold text-amber-300 mt-0.5">
+                                  {quickTelemetry.tokens.total.toLocaleString()}
+                                </div>
+                                <div className="text-[9.5px] text-slate-500 mt-0.5">
+                                  P: {quickTelemetry.tokens.prompt.toLocaleString()} | C: {quickTelemetry.tokens.completion.toLocaleString()}
+                                </div>
+                              </div>
+                              <div className="p-2.5 rounded bg-slate-900/80 border border-slate-800">
+                                <div className="text-[10px] text-slate-400 uppercase font-sans">Estimated Cost</div>
+                                <div className="text-base font-bold text-emerald-400 mt-0.5">
+                                  ${quickTelemetry.tokens.cost_usd.toFixed(4)}
+                                </div>
+                                <div className="text-[9.5px] text-slate-500 mt-0.5">
+                                  {quickTelemetry.tokens.invocations} calls logged
+                                </div>
+                              </div>
+                              <div className="p-2.5 rounded bg-slate-900/80 border border-slate-800">
+                                <div className="text-[10px] text-slate-400 uppercase font-sans">Avg Latency</div>
+                                <div className="text-base font-bold text-cyan-300 mt-0.5">
+                                  {quickTelemetry.tokens.avg_latency_sec}s
+                                </div>
+                                <div className="text-[9.5px] text-slate-500 mt-0.5">
+                                  {quickTelemetry.tokens.avg_latency_ms} ms avg
+                                </div>
+                              </div>
+                              <div className="p-2.5 rounded bg-slate-900/80 border border-slate-800">
+                                <div className="text-[10px] text-slate-400 uppercase font-sans">QA Pass Rate</div>
+                                <div className="text-base font-bold text-purple-300 mt-0.5">
+                                  {quickTelemetry.qa.pass_rate_pct}%
+                                </div>
+                                <div className="text-[9.5px] text-slate-500 mt-0.5">
+                                  {quickTelemetry.qa.passed_tests}/{quickTelemetry.qa.total_tests} tests
+                                </div>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => setShowAnalyticsModal(true)}
+                              className="w-full mt-2 py-2 px-3 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer"
+                            >
+                              <Activity className="h-3.5 w-3.5" />
+                              Open Full Analytics & Telemetry Portal ↗
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="text-slate-500 text-xs py-4 text-center">
+                            Loading telemetry from SQLite...
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : null}
 
             </div>
 
@@ -2897,6 +3363,13 @@ export default function WorkspacePage() {
 
         onSave={(newToggles) => handleSaveModalToggles(newToggles)}
 
+      />
+
+      <AnalyticsDashboardModal
+        isOpen={showAnalyticsModal}
+        onClose={() => setShowAnalyticsModal(false)}
+        projects={projects}
+        selectedProjectId={selectedProject?.id || null}
       />
 
     </div>

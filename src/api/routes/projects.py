@@ -44,6 +44,7 @@ class ProjectItem(BaseModel):
     description: str | None = None
     target_framework: str
     status: str
+    git_remote_url: str | None = None
     current_branch: str | None = "develop"
 
 
@@ -52,6 +53,7 @@ class CreateProjectRequest(BaseModel):
     description: str | None = None
     target_framework: str = "PYTHON_FASTAPI"
     custom_workspace_path: str | None = None
+    git_remote_url: str | None = None
     agent_toggles: dict[str, bool] | None = None
 
 
@@ -71,7 +73,7 @@ def get_default_agent_specs() -> list[dict[str, object]]:
         (
             "AGENT_1",
             "Agent 1: Documentation Reviewer",
-            True,
+            False,
             True,
             "gemini",
             "gemini-3.5-flash-lite",
@@ -84,7 +86,7 @@ def get_default_agent_specs() -> list[dict[str, object]]:
             "gemini",
             "gemini-3.5-flash-lite",
         ),
-        ("AGENT_3", "Agent 3: Main Coding Agent", True, True, "gemini", "gemini-3.5-flash-lite"),
+        ("AGENT_3", "Agent 3: Main Coding Agent", False, True, "gemini", "gemini-3.5-flash-lite"),
         (
             "AGENT_4",
             "Agent 4: Independent QA Engineer",
@@ -137,12 +139,18 @@ def ensure_project_agent_configs(
 
         if not orm:
             is_enabled = spec["default_enabled"]
-            if spec["is_mandatory"]:
-                is_enabled = True
-            elif agent_toggles:
-                if key == "AGENT_2":
+            if agent_toggles:
+                if key == "AGENT_1":
+                    is_enabled = agent_toggles.get(
+                        "agent1", agent_toggles.get("agent1_enabled", spec["default_enabled"])
+                    )
+                elif key == "AGENT_2":
                     is_enabled = agent_toggles.get(
                         "agent2", agent_toggles.get("agent2_enabled", spec["default_enabled"])
+                    )
+                elif key == "AGENT_3":
+                    is_enabled = agent_toggles.get(
+                        "agent3", agent_toggles.get("agent3_enabled", spec["default_enabled"])
                     )
                 elif key == "AGENT_4":
                     is_enabled = agent_toggles.get(
@@ -175,6 +183,7 @@ def ensure_project_agent_configs(
 @router.get("", response_model=list[ProjectItem])
 def list_projects(db: Session = Depends(get_db)):
     projects = db.query(ProjectORM).order_by(ProjectORM.created_at.desc()).all()
+    git_service = GitService(db=db)
     return [
         ProjectItem(
             id=p.id,
@@ -182,7 +191,8 @@ def list_projects(db: Session = Depends(get_db)):
             description=p.description,
             target_framework=p.target_framework,
             status=p.status,
-            current_branch="develop",
+            git_remote_url=getattr(p, "git_remote_url", None),
+            current_branch="develop" if (Path(git_service.get_repository_path(p.id, RepositoryType.CHANNEL_APP)) / ".git").exists() else None,
         )
         for p in projects
     ]
@@ -196,6 +206,7 @@ def create_project(req: CreateProjectRequest, db: Session = Depends(get_db)):
         description=req.description,
         target_framework=req.target_framework,
         status="ACTIVE",
+        git_remote_url=req.git_remote_url,
     )
 
     db.add(project)
@@ -221,6 +232,7 @@ def create_project(req: CreateProjectRequest, db: Session = Depends(get_db)):
         description=project.description,
         target_framework=project.target_framework,
         status=project.status,
+        git_remote_url=project.git_remote_url,
         current_branch=None,
     )
 
@@ -360,7 +372,9 @@ def get_project_file_content(project_id: uuid.UUID, path: str, db: Session = Dep
 
 
 class UpdateAgentsRequest(BaseModel):
+    agent1_enabled: bool | None = None
     agent2_enabled: bool | None = None
+    agent3_enabled: bool | None = None
     agent4_enabled: bool | None = None
     agent5_enabled: bool | None = None
     toggles: dict[str, bool] | None = None
@@ -391,8 +405,6 @@ def _format_agents_response(
         is_en = cfg.is_enabled if cfg else spec["default_enabled"]
         prov = cfg.provider if cfg else spec["default_provider"]
         model = cfg.model_name if cfg else spec["default_model"]
-        if spec["is_mandatory"]:
-            is_en = True
 
         agents_list.append(
             {
@@ -409,7 +421,9 @@ def _format_agents_response(
         "project_id": str(project_id),
         "agents": agents_list,
         "toggles": {
+            "agent1": by_type.get("AGENT_1").is_enabled if by_type.get("AGENT_1") else True,
             "agent2": by_type.get("AGENT_2").is_enabled if by_type.get("AGENT_2") else True,
+            "agent3": by_type.get("AGENT_3").is_enabled if by_type.get("AGENT_3") else True,
             "agent4": by_type.get("AGENT_4").is_enabled if by_type.get("AGENT_4") else True,
             "agent5": by_type.get("AGENT_5").is_enabled if by_type.get("AGENT_5") else True,
         },
@@ -439,15 +453,23 @@ def update_project_agents(
     configs = ensure_project_agent_configs(project_id, db)
 
     toggles_to_apply = {}
+    if req.agent1_enabled is not None:
+        toggles_to_apply["AGENT_1"] = req.agent1_enabled
     if req.agent2_enabled is not None:
         toggles_to_apply["AGENT_2"] = req.agent2_enabled
+    if req.agent3_enabled is not None:
+        toggles_to_apply["AGENT_3"] = req.agent3_enabled
     if req.agent4_enabled is not None:
         toggles_to_apply["AGENT_4"] = req.agent4_enabled
     if req.agent5_enabled is not None:
         toggles_to_apply["AGENT_5"] = req.agent5_enabled
     if req.toggles:
+        if "agent1" in req.toggles:
+            toggles_to_apply["AGENT_1"] = req.toggles["agent1"]
         if "agent2" in req.toggles:
             toggles_to_apply["AGENT_2"] = req.toggles["agent2"]
+        if "agent3" in req.toggles:
+            toggles_to_apply["AGENT_3"] = req.toggles["agent3"]
         if "agent4" in req.toggles:
             toggles_to_apply["AGENT_4"] = req.toggles["agent4"]
         if "agent5" in req.toggles:
@@ -458,7 +480,9 @@ def update_project_agents(
         for key, val in toggles_to_apply.items():
             if (
                 key in atype
+                or (key == "AGENT_1" and "DOC" in atype)
                 or (key == "AGENT_2" and "MOCK" in atype)
+                or (key == "AGENT_3" and "MAIN" in atype)
                 or (key == "AGENT_4" and "QA" in atype)
                 or (key == "AGENT_5" and "SEC" in atype)
             ):
@@ -803,7 +827,8 @@ def get_project_messages(project_id: uuid.UUID, db: Session = Depends(get_db)):
         )
 
     return {
-        "run_id": str(latest_run.id),
+        "run_id": str(latest_run.id) if latest_run else None,
+        "run_status": latest_run.status if latest_run else "IDLE",
         "messages": messages,
     }
 

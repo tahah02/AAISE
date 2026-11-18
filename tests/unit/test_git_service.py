@@ -26,7 +26,7 @@ def db_session():
     Session = sessionmaker(bind=engine)
     session = Session()
 
-    project = ProjectORM(name="Repo Test Project", target_framework="fastapi")
+    project = ProjectORM(name="Repo Test Project", target_framework="fastapi", git_remote_url="https://github.com/mock/repo.git")
     session.add(project)
     session.commit()
 
@@ -174,7 +174,7 @@ def test_checkout_branch(db_session, temp_workspace):
 
 
 def test_create_release_manifest_channel_only(db_session, temp_workspace):
-    project = ProjectORM(name="Channel Only Project", target_framework="fastapi")
+    project = ProjectORM(name="Channel Only Project", target_framework="fastapi", git_remote_url="https://github.com/mock/repo.git")
     db_session.add(project)
     db_session.commit()
 
@@ -194,7 +194,7 @@ def test_create_release_manifest_channel_only(db_session, temp_workspace):
 
 
 def test_create_release_manifest_dual_repo(db_session, temp_workspace):
-    project = ProjectORM(name="Dual Repo Project", target_framework="fastapi")
+    project = ProjectORM(name="Dual Repo Project", target_framework="fastapi", git_remote_url="https://github.com/mock/repo.git")
     db_session.add(project)
     db_session.commit()
 
@@ -252,5 +252,34 @@ def test_git_service_merge_branch(db_session, temp_workspace):
     current_branch = service.get_current_branch(project.id, RepositoryType.CHANNEL_APP)
     assert current_branch == "develop"
     assert (repo_path / "feature.txt").exists()
+
+
+def test_clean_file_mode_when_no_git_remote_url(db_session, temp_workspace):
+    # Create project without git_remote_url (Default Mode)
+    clean_project = ProjectORM(name="Clean No-Git Project", target_framework="fastapi", git_remote_url=None)
+    db_session.add(clean_project)
+    db_session.commit()
+
+    service = GitService(db=db_session, base_workspace_dir=temp_workspace)
+    assert service.is_git_enabled(clean_project.id) is False
+
+    repo_path_str = service.initialize_repository(
+        project_id=clean_project.id,
+        repo_type=RepositoryType.CHANNEL_APP,
+        target_framework="python",
+    )
+    repo_path = Path(repo_path_str)
+    assert repo_path.exists()
+    assert (repo_path / ".gitignore").exists()
+    assert (repo_path / "README.md").exists()
+    # CRITICAL: No .git directory must be created!
+    assert not (repo_path / ".git").exists()
+
+    # Operations in file mode must be safe no-ops
+    assert service.create_branch(clean_project.id, RepositoryType.CHANNEL_APP, "feature/foo") == "feature/foo"
+    assert service.commit_changes(clean_project.id, RepositoryType.CHANNEL_APP, "feat: some change") == "FILE_SAVED"
+    assert service.get_current_branch(clean_project.id, RepositoryType.CHANNEL_APP) is None
+    assert service.get_all_branches(clean_project.id, RepositoryType.CHANNEL_APP) == []
+
 
 

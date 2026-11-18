@@ -12,7 +12,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column, relationship, synonym
 
 
 def utc_now() -> datetime:
@@ -23,7 +23,22 @@ class Base(DeclarativeBase):
     pass
 
 
-class ProjectORM(Base):
+class AuditModelMixin:
+    created_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(100), default="system", nullable=False)
+    updated_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    updated_by: Mapped[str] = mapped_column(String(100), default="system", nullable=False)
+
+    @declared_attr
+    def created_at(cls):
+        return synonym("created_date")
+
+    @declared_attr
+    def updated_at(cls):
+        return synonym("updated_date")
+
+
+class ProjectORM(AuditModelMixin, Base):
     __tablename__ = "projects"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -31,8 +46,7 @@ class ProjectORM(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     target_framework: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="ACTIVE")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    git_remote_url: Mapped[str | None] = mapped_column(String(500), nullable=True, default=None)
 
     agent_configs: Mapped[list["ProjectAgentConfigORM"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -69,7 +83,7 @@ class ProjectORM(Base):
     )
 
 
-class ProjectAgentConfigORM(Base):
+class ProjectAgentConfigORM(AuditModelMixin, Base):
     __tablename__ = "project_agent_configs"
     __table_args__ = (UniqueConstraint("project_id", "agent_type", name="uq_project_agent_type"),)
 
@@ -80,13 +94,11 @@ class ProjectAgentConfigORM(Base):
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)
     custom_system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
     project: Mapped["ProjectORM"] = relationship(back_populates="agent_configs")
 
 
-class ProjectFileORM(Base):
+class ProjectFileORM(AuditModelMixin, Base):
     __tablename__ = "project_files"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -95,18 +107,16 @@ class ProjectFileORM(Base):
     file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     file_type: Mapped[str] = mapped_column(String(50), nullable=False)
     file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     project: Mapped["ProjectORM"] = relationship(back_populates="files")
 
 
-class ConversationORM(Base):
+class ConversationORM(AuditModelMixin, Base):
     __tablename__ = "conversations"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     project: Mapped["ProjectORM"] = relationship(back_populates="conversations")
     messages: Mapped[list["MessageORM"]] = relationship(
@@ -114,7 +124,7 @@ class ConversationORM(Base):
     )
 
 
-class MessageORM(Base):
+class MessageORM(AuditModelMixin, Base):
     __tablename__ = "messages"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -123,12 +133,11 @@ class MessageORM(Base):
     agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     conversation: Mapped["ConversationORM"] = relationship(back_populates="messages")
 
 
-class WorkflowRunORM(Base):
+class WorkflowRunORM(AuditModelMixin, Base):
     __tablename__ = "workflow_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -136,7 +145,6 @@ class WorkflowRunORM(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
     current_phase: Mapped[str] = mapped_column(String(100), nullable=False)
     iteration_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped["ProjectORM"] = relationship(back_populates="workflow_runs")
@@ -151,19 +159,18 @@ class WorkflowRunORM(Base):
     )
 
 
-class WorkflowEventORM(Base):
+class WorkflowEventORM(AuditModelMixin, Base):
     __tablename__ = "workflow_events"
 
     id: Mapped[int] = mapped_column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     workflow_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workflow_runs.id", ondelete="CASCADE"), index=True, nullable=False)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     event_payload: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     workflow_run: Mapped["WorkflowRunORM"] = relationship(back_populates="events")
 
 
-class WorkflowCheckpointORM(Base):
+class WorkflowCheckpointORM(AuditModelMixin, Base):
     __tablename__ = "workflow_checkpoints"
     __table_args__ = (
         UniqueConstraint("workflow_run_id", "checkpoint_key", "version", name="uq_run_checkpoint_version"),
@@ -174,12 +181,11 @@ class WorkflowCheckpointORM(Base):
     checkpoint_key: Mapped[str] = mapped_column(String(200), nullable=False)
     state_data: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     workflow_run: Mapped["WorkflowRunORM"] = relationship(back_populates="checkpoints")
 
 
-class HumanApprovalORM(Base):
+class HumanApprovalORM(AuditModelMixin, Base):
     __tablename__ = "human_approvals"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -194,7 +200,7 @@ class HumanApprovalORM(Base):
     workflow_run: Mapped["WorkflowRunORM"] = relationship(back_populates="approvals")
 
 
-class AgentTaskORM(Base):
+class AgentTaskORM(AuditModelMixin, Base):
     __tablename__ = "agent_tasks"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -202,7 +208,6 @@ class AgentTaskORM(Base):
     agent_name: Mapped[str] = mapped_column(String(100), nullable=False)
     task_type: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     project: Mapped["ProjectORM"] = relationship(back_populates="agent_tasks")
     executions: Mapped[list["AgentExecutionORM"]] = relationship(
@@ -210,7 +215,7 @@ class AgentTaskORM(Base):
     )
 
 
-class AgentExecutionORM(Base):
+class AgentExecutionORM(AuditModelMixin, Base):
     __tablename__ = "agent_executions"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -228,7 +233,7 @@ class AgentExecutionORM(Base):
     )
 
 
-class LLMInvocationORM(Base):
+class LLMInvocationORM(AuditModelMixin, Base):
     __tablename__ = "llm_invocations"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -246,7 +251,7 @@ class LLMInvocationORM(Base):
     )
 
 
-class TokenUsageORM(Base):
+class TokenUsageORM(AuditModelMixin, Base):
     __tablename__ = "token_usage"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -259,7 +264,7 @@ class TokenUsageORM(Base):
     llm_invocation: Mapped["LLMInvocationORM"] = relationship(back_populates="token_usage")
 
 
-class ToolExecutionORM(Base):
+class ToolExecutionORM(AuditModelMixin, Base):
     __tablename__ = "tool_executions"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -273,19 +278,18 @@ class ToolExecutionORM(Base):
     agent_execution: Mapped["AgentExecutionORM"] = relationship(back_populates="tool_executions")
 
 
-class GitRepositoryORM(Base):
+class GitRepositoryORM(AuditModelMixin, Base):
     __tablename__ = "git_repositories"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     repo_type: Mapped[str] = mapped_column(String(50), nullable=False)
     local_path: Mapped[str] = mapped_column(String(1000), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     project: Mapped["ProjectORM"] = relationship(back_populates="git_repositories")
 
 
-class GitReleaseManifestORM(Base):
+class GitReleaseManifestORM(AuditModelMixin, Base):
     __tablename__ = "git_release_manifests"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -295,12 +299,11 @@ class GitReleaseManifestORM(Base):
     mock_commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
     test_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("test_runs.id", ondelete="SET NULL"), nullable=True)
     security_scan_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("security_scans.id", ondelete="SET NULL"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     project: Mapped["ProjectORM"] = relationship(back_populates="release_manifests")
 
 
-class TestCaseORM(Base):
+class TestCaseORM(AuditModelMixin, Base):
     __tablename__ = "test_cases"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -317,7 +320,7 @@ class TestCaseORM(Base):
     )
 
 
-class TestRunORM(Base):
+class TestRunORM(AuditModelMixin, Base):
     __tablename__ = "test_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -334,7 +337,7 @@ class TestRunORM(Base):
     )
 
 
-class TestResultORM(Base):
+class TestResultORM(AuditModelMixin, Base):
     __tablename__ = "test_results"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -348,7 +351,7 @@ class TestResultORM(Base):
     test_case: Mapped["TestCaseORM"] = relationship(back_populates="results")
 
 
-class DefectORM(Base):
+class DefectORM(AuditModelMixin, Base):
     __tablename__ = "defects"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -357,12 +360,11 @@ class DefectORM(Base):
     severity: Mapped[str] = mapped_column(String(50), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="OPEN", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     project: Mapped["ProjectORM"] = relationship(back_populates="defects")
 
 
-class SecurityScanORM(Base):
+class SecurityScanORM(AuditModelMixin, Base):
     __tablename__ = "security_scans"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -377,7 +379,7 @@ class SecurityScanORM(Base):
     )
 
 
-class SecurityFindingORM(Base):
+class SecurityFindingORM(AuditModelMixin, Base):
     __tablename__ = "security_findings"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)

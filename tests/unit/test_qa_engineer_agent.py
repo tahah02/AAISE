@@ -263,3 +263,114 @@ def test_qa_agent_parses_real_trx_results(tmp_path):
     assert parsed[2]["category"] == "INTEGRATION_TEST"
     assert parsed[2]["status"] == "FAILED"
     assert "Expected 409, Actual 200" in parsed[2]["details"]
+
+
+@pytest.mark.asyncio
+async def test_qa_agent_executes_live_http_contract_testing_and_clean_shutdown(qa_setup, monkeypatch):
+    import http.server
+    import threading
+    from src.infrastructure.execution.process_manager import ProjectProcessManager
+
+    session, project, task, execution, tmp = qa_setup
+
+    # Start a real ephemeral test HTTP server
+    class TestHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"healthy"}')
+            elif self.path == "/api/users/1":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"id":1,"name":"Alice"}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            if self.path == "/api/users":
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"id":1,"name":"Alice"}')
+            else:
+                self.send_response(400)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass  # Suppress console logging
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), TestHandler)
+    server_port = server.server_address[1]
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    stop_called = False
+
+    class MockPM:
+        def start_project(self, project_id, target_framework, subsystem="channel-app"):
+            return {
+                "status": "RUNNING",
+                "info": {"port": server_port, "pid": 99999},
+            }
+
+        def stop_project(self, project_id, subsystem=None):
+            nonlocal stop_called
+            stop_called = True
+            server.shutdown()
+            return {"status": "STOPPED"}
+
+    monkeypatch.setattr(
+        ProjectProcessManager,
+        "get_instance",
+        lambda *args, **kwargs: MockPM(),
+    )
+
+    test_cases = [
+        {
+            "test_key": "TC-01",
+            "test_name": "Health check",
+            "category": "HEALTH",
+            "http_method": "GET",
+            "endpoint": "/health",
+            "expected_status": 200,
+        },
+        {
+            "test_key": "TC-02",
+            "test_name": "Create user",
+            "category": "CONTRACT",
+            "http_method": "POST",
+            "endpoint": "/api/users",
+            "payload": {"name": "Alice"},
+            "expected_status": 201,
+        },
+    ]
+
+    agent = QAEngineerAgent(
+        resolver=LLMProviderResolver(litellm_adapter=FakeQALLMAdapter()),
+        db=session,
+    )
+
+    all_passed, results, log = await agent._execute_live_http_tests(
+        project_id=project.id,
+        target_framework="python",
+        test_cases=test_cases,
+        workspace_path=tmp,
+    )
+
+    if not all_passed:
+        for r in results:
+            print("TEST RESULT:", r)
+    assert all_passed is True
+    assert len(results) == 2
+    assert results[0]["status"] == "PASSED"
+    assert results[0]["actual_status"] == 200
+    assert results[1]["status"] == "PASSED"
+    assert results[1]["actual_status"] == 201
+    assert "curl -X POST" in results[1]["curl_command"]
+    assert "Alice" in results[1]["curl_command"]
+    # Verify clean shutdown was called
+    assert stop_called is True

@@ -1,10 +1,13 @@
 from src.application.chat.chat_service import save_chat_message
 
+import logging
 import uuid
 
 from typing import Any
 
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from src.application.agents.doc_reviewer import DocumentationReviewerAgent
 
@@ -124,15 +127,13 @@ class OrchestratorService:
                 enabled_map[AgentType.MAIN_CODING.name] = c.is_enabled
                 enabled_map["AGENT_3"] = c.is_enabled
 
-        # Mandatory invariants
-        enabled_map[AgentType.DOC_REVIEWER.name] = True
-        enabled_map["AGENT_1"] = True
-        enabled_map[AgentType.MAIN_CODING.name] = True
-        enabled_map["AGENT_3"] = True
-
-        # Defaults for optional agents if not explicitly configured
+        # Defaults for agents if not explicitly configured in database
+        enabled_map.setdefault(AgentType.DOC_REVIEWER.name, True)
+        enabled_map.setdefault("AGENT_1", True)
         enabled_map.setdefault(AgentType.MOCK_DEVELOPER.name, True)
         enabled_map.setdefault("AGENT_2", True)
+        enabled_map.setdefault(AgentType.MAIN_CODING.name, True)
+        enabled_map.setdefault("AGENT_3", True)
         enabled_map.setdefault(AgentType.QA_ENGINEER.name, True)
         enabled_map.setdefault("AGENT_4", True)
         enabled_map.setdefault(AgentType.SECURITY_REVIEWER.name, True)
@@ -238,15 +239,6 @@ class OrchestratorService:
             / "TECHNICAL_DESIGN.md"
         )
 
-        if is_revision_intent:
-            is_spec_approved = False
-        elif latest_spec_approval and latest_spec_approval.status == "REJECTED":
-            is_spec_approved = False
-        else:
-            is_spec_approved = (
-                latest_spec_approval is not None and latest_spec_approval.status == "APPROVED"
-            ) or (is_approved_intent and tdd_check.exists())
-
         run = None
 
         if workflow_run_id:
@@ -259,6 +251,26 @@ class OrchestratorService:
                 .order_by(WorkflowRunORM.created_at.desc())
                 .first()
             )
+
+        existing_approvals = []
+        if run:
+            existing_approvals = (
+                self.db.query(HumanApprovalORM)
+                .filter_by(workflow_run_id=run.id)
+                .all()
+            )
+
+        is_spec_approved = (
+            any(a.gate_type == "SPECIFICATION" and a.status == "APPROVED" for a in existing_approvals)
+            or (is_approved_intent and tdd_check.exists())
+        )
+        if is_revision_intent:
+            is_spec_approved = False
+
+        is_mock_approved = any(a.gate_type == "MOCK_DEVELOPMENT" and a.status == "APPROVED" for a in existing_approvals)
+        is_code_approved = any(a.gate_type == "DEVELOPMENT" and a.status == "APPROVED" for a in existing_approvals)
+        is_qa_approved = any(a.gate_type == "QA_VERIFICATION" and a.status == "APPROVED" for a in existing_approvals)
+        is_security_approved = any(a.gate_type == "SECURITY_AUDIT" and a.status == "APPROVED" for a in existing_approvals)
 
         if not run or run.status in ("COMPLETED", "FAILED"):
             run = WorkflowRunORM(
@@ -342,6 +354,8 @@ class OrchestratorService:
                 user_requirement, default="TYPESCRIPT_NEXTJS"
             )
 
+        persisted_iterations = run.iteration_count or 0
+
         initial_state: WorkflowState = {
             "project_id": str(project_id),
             "workflow_run_id": str(run.id),
@@ -352,11 +366,15 @@ class OrchestratorService:
             "requires_mock_vendor": requires_mock,
             "channel_repo_path": channel_repo_path,
             "mock_repo_path": mock_repo_path,
-            "defect_remediation_count": 0,
+            "defect_remediation_count": persisted_iterations,
             "spec_approved": is_spec_approved,
             "spec_approval_comments": user_requirement if is_revision_intent else None,
+            "mock_approved": is_mock_approved,
+            "code_approved": is_code_approved,
+            "qa_approved": is_qa_approved,
+            "security_approved": is_security_approved,
             "release_approved": True,
-            "iteration": 0,
+            "iteration": persisted_iterations,
             "is_completed": False,
             "is_incremental": is_incremental,
             "target_subsystem": "frontend" if is_incremental else "channel-app",
@@ -418,7 +436,17 @@ class OrchestratorService:
                 },
             )
 
+        def _is_run_cancelled() -> bool:
+            try:
+                self.db.refresh(run)
+                return run.status == "CANCELLED"
+            except Exception:
+                return False
+
         async def doc_node(s: WorkflowState) -> WorkflowState:
+            if _is_run_cancelled():
+                s["is_cancelled"] = True
+                return s
 
             tdd_disk = Path(s["workspace_path"]) / "docs" / "TECHNICAL_DESIGN.md"
 
@@ -450,6 +478,8 @@ class OrchestratorService:
                 if res.metadata.get("target_framework"):
                     s["target_framework"] = res.metadata["target_framework"]
 
+                telemetry = self.tracker.get_execution_telemetry(ctx.agent_execution_id)
+
                 save_chat_message(
                     self.db,
                     project_id,
@@ -461,7 +491,8 @@ class OrchestratorService:
                             "Extracted functional requirements & API contracts",
                             "Created test specifications",
                             "Generated Technical Design Document (TDD)",
-                        ]
+                        ],
+                        "telemetry": telemetry,
                     },
                 )
 
@@ -549,6 +580,9 @@ class OrchestratorService:
             return s
 
         async def mock_node(s: WorkflowState) -> WorkflowState:
+            if _is_run_cancelled():
+                s["is_cancelled"] = True
+                return s
 
             tdd_content = ""
             tdd_path_candidate = Path(s["workspace_path"]) / "docs" / "TECHNICAL_DESIGN.md"
@@ -621,6 +655,8 @@ class OrchestratorService:
 
             s["current_phase"] = "MOCK_DEVELOPMENT"
 
+            telemetry = self.tracker.get_execution_telemetry(ctx.agent_execution_id)
+
             save_chat_message(
                 self.db,
                 project_id,
@@ -631,9 +667,38 @@ class OrchestratorService:
                         "Synthesized mock API endpoints in FastAPI",
                         "Created schema-compliant responses & error states",
                         "Committed changes to mock-vendor-api repository",
-                    ]
+                    ],
+                    "telemetry": telemetry,
                 },
             )
+
+            if not s.get("mock_approved"):
+                existing_app = (
+                    self.db.query(HumanApprovalORM)
+                    .filter_by(workflow_run_id=run.id, gate_type="MOCK_DEVELOPMENT", status="PENDING")
+                    .first()
+                )
+                if not existing_app:
+                    new_app = self.approval_engine.create_approval_request(
+                        workflow_run_id=run.id,
+                        gate_type="MOCK_DEVELOPMENT",
+                        prompt_text="Agent 2 has synthesized the Mock Vendor API. Shall I proceed with Channel Application implementation?",
+                    )
+                    save_chat_message(
+                        self.db,
+                        project_id,
+                        "agent2",
+                        "Human approval required to proceed with Channel Application implementation.",
+                        metadata={
+                            "isApprovalCard": True,
+                            "approvalRequired": True,
+                            "approvalId": str(new_app.id),
+                            "gateType": "MOCK_DEVELOPMENT",
+                            "status": "PENDING",
+                            "isApproved": False,
+                        },
+                    )
+                s["mock_approved"] = False
 
             self.checkpoint_service.save_checkpoint(run.id, "MOCK_DEVELOPMENT", s)
 
@@ -642,6 +707,9 @@ class OrchestratorService:
             return s
 
         async def code_node(s: WorkflowState) -> WorkflowState:
+            if _is_run_cancelled():
+                s["is_cancelled"] = True
+                return s
 
             app_dir = Path(s["workspace_path"]) / "channel-app"
 
@@ -687,6 +755,7 @@ class OrchestratorService:
             ctx = _make_context(s, "Agent 3: Main Coding Agent", "DEVELOPMENT")
             res = await agent3.execute(ctx, coding_input)
             if remediation_count > 0:
+                run.iteration_count = remediation_count
                 self.db.query(DefectORM).filter_by(project_id=project_id, status="OPEN").update(
                     {"status": "RESOLVED"}
                 )
@@ -708,28 +777,50 @@ class OrchestratorService:
             target_folder = "frontend/" if is_frontend else "channel-app/"
             fw_label = res.metadata.get("effective_framework", "Clean Architecture")
 
+            attempts_taken = res.metadata.get("attempts", 1)
+            was_repaired = res.metadata.get("was_repaired", False)
+
             if s["build_success"]:
-                agent3_msg = f"{subsystem_label} synthesized, verified with 0 errors, and committed to repository."
-                checklist = [
-                    f"Synthesized multi-file {fw_label} structure in {target_folder}",
-                    "Generated project configuration",
-                    "Verified build and dependency installation (0 errors)",
-                ]
+                if was_repaired:
+                    agent3_msg = (
+                        f"✅ **Build Verified & Auto-Repaired by Agent 3** (Attempt {attempts_taken}/3)\n\n"
+                        f"Initial compilation encountered errors. Agent 3 analyzed the diagnostics and autonomously corrected the source code.\n\n"
+                        f"- **Status**: `PASSED (0 Errors)`\n"
+                        f"- **Artifacts**: {len(res.artifacts_created or [])} files compiled & verified\n"
+                    )
+                    checklist = [
+                        f"Synthesized multi-file {fw_label} structure in {target_folder}",
+                        f"Auto-repaired compiler errors on attempt {attempts_taken}",
+                        "Build verification: PASSED (0 Errors)",
+                    ]
+                else:
+                    agent3_msg = (
+                        f"✅ **Build Verified Successfully** (Attempt 1/3)\n\n"
+                        f"{subsystem_label} synthesized and cleanly compiled with zero compiler errors.\n\n"
+                        f"- **Status**: `PASSED (0 Errors)`\n"
+                        f"- **Artifacts**: {len(res.artifacts_created or [])} files verified\n"
+                    )
+                    checklist = [
+                        f"Synthesized multi-file {fw_label} structure in {target_folder}",
+                        "Generated project configuration",
+                        "Build verification: PASSED (0 Errors)",
+                    ]
             else:
                 err_lines = [
                     l.strip()
                     for l in build_log.splitlines()
-                    if "error CS" in l or "Error(s)" in l or "FAILED" in l or "error:" in l
+                    if "error CS" in l or "Error(s)" in l or "FAILED" in l or "error:" in l or "SyntaxError" in l
                 ]
                 err_summary = (
-                    "\n".join(err_lines[:6])
+                    "\n".join(err_lines[:8])
                     if err_lines
-                    else "Compiler errors detected during build verification."
+                    else "Compiler / syntax errors detected during build verification."
                 )
                 agent3_msg = (
-                    f"⚠️ {subsystem_label} synthesized, but build compilation failed:\n\n"
-                    f"```\n{err_summary}\n```\n\n"
-                    f"Committed code to repository for inspection and defect resolution."
+                    f"❌ **Build Verification Failed** (Attempt {attempts_taken}/3)\n\n"
+                    f"{subsystem_label} synthesized, but compilation failed. Root cause diagnostics:\n\n"
+                    f"```text\n{err_summary}\n```\n\n"
+                    f"Agent 3 attempted self-healing, but compiler errors persisted. Human review required."
                 )
                 checklist = [
                     f"Synthesized multi-file {fw_label} structure in {target_folder}",
@@ -737,13 +828,53 @@ class OrchestratorService:
                     "Build verification: FAILED (compiler errors detected)",
                 ]
 
+            telemetry = self.tracker.get_execution_telemetry(ctx.agent_execution_id)
+
             save_chat_message(
                 self.db,
                 project_id,
                 "agent3",
                 agent3_msg,
-                metadata={"checklist": checklist},
+                metadata={
+                    "checklist": checklist,
+                    "buildInfo": {
+                        "buildSuccess": s["build_success"],
+                        "wasRepaired": was_repaired,
+                        "attempts": attempts_taken,
+                        "framework": fw_label,
+                        "errorSummary": err_summary if not s["build_success"] else None,
+                    },
+                    "telemetry": telemetry,
+                },
             )
+
+            if not s.get("code_approved"):
+                existing_app = (
+                    self.db.query(HumanApprovalORM)
+                    .filter_by(workflow_run_id=run.id, gate_type="DEVELOPMENT", status="PENDING")
+                    .first()
+                )
+                if not existing_app:
+                    new_app = self.approval_engine.create_approval_request(
+                        workflow_run_id=run.id,
+                        gate_type="DEVELOPMENT",
+                        prompt_text="Agent 3 has completed the Channel Application implementation and verified the build. Shall I proceed with Independent QA testing?",
+                    )
+                    save_chat_message(
+                        self.db,
+                        project_id,
+                        "agent3",
+                        "Human approval required to proceed with Independent QA Verification.",
+                        metadata={
+                            "isApprovalCard": True,
+                            "approvalRequired": True,
+                            "approvalId": str(new_app.id),
+                            "gateType": "DEVELOPMENT",
+                            "status": "PENDING",
+                            "isApproved": False,
+                        },
+                    )
+                s["code_approved"] = False
 
             self.checkpoint_service.save_checkpoint(run.id, "DEVELOPMENT", s)
 
@@ -752,6 +883,9 @@ class OrchestratorService:
             return s
 
         async def qa_node(s: WorkflowState) -> WorkflowState:
+            if _is_run_cancelled():
+                s["is_cancelled"] = True
+                return s
             remediation_count = s.get("defect_remediation_count", 0)
             attempt_num = remediation_count + 1
 
@@ -898,6 +1032,39 @@ class OrchestratorService:
             if cli_out and "No channel" not in cli_out:
                 cli_md = f"\n\n**Test Runner Execution:**\n```text\n{cli_out[:500]}\n```"
 
+            qa_report_data = {
+                "status": s["qa_status"],
+                "passedCount": s["qa_passed_count"],
+                "failedCount": s["qa_failed_count"],
+                "totalCount": s["qa_passed_count"] + s["qa_failed_count"],
+                "liveExecuted": res.metadata.get("live_executed", False),
+                "testResults": [
+                    {
+                        "testKey": tr.get("test_key", "TC"),
+                        "name": tr.get("test_name") or tr.get("name") or tr.get("test_key", "TC"),
+                        "category": tr.get("category", "CONTRACT"),
+                        "httpMethod": tr.get("http_method", "GET"),
+                        "endpoint": tr.get("endpoint", "/"),
+                        "expectedStatus": tr.get("expected_status", 200),
+                        "actualStatus": tr.get("actual_status", 200),
+                        "latency": tr.get("duration") or tr.get("latency") or "N/A",
+                        "status": tr.get("status", "PASSED"),
+                        "details": tr.get("details", ""),
+                        "curlCommand": tr.get("curl_command", ""),
+                        "requestPayload": tr.get("request_payload"),
+                        "responseBody": tr.get("response_body", ""),
+                    }
+                    for tr in test_results
+                ],
+            }
+
+            qa_checklist = [
+                "Evaluated black-box HTTP contract specifications",
+                f"Tested {len(test_results)} API endpoints & boundary scenarios",
+                "Cleanly terminated test process & verified socket closure",
+                f"QA Contract Test Status: {s['qa_status']} ({s['qa_passed_count']} passed, {s['qa_failed_count']} failed)",
+            ]
+
             if s["qa_status"] == "PASSED":
                 if remediation_count > 0:
                     report_msg = (
@@ -921,7 +1088,14 @@ class OrchestratorService:
                         f"{table_md}"
                         f"{cli_md}"
                     )
-                save_chat_message(self.db, project_id, "agent4", report_msg)
+                qa_telemetry = self.tracker.get_execution_telemetry(ctx.agent_execution_id)
+                save_chat_message(
+                    self.db,
+                    project_id,
+                    "agent4",
+                    report_msg,
+                    metadata={"qaReport": qa_report_data, "checklist": qa_checklist, "telemetry": qa_telemetry},
+                )
             else:
                 report_msg = (
                     f"### ❌ Independent QA Test Report (Attempt {attempt_num})\n\n"
@@ -933,7 +1107,14 @@ class OrchestratorService:
                     f"{table_md}"
                     f"{cli_md}"
                 )
-                save_chat_message(self.db, project_id, "agent4", report_msg)
+                qa_telemetry = self.tracker.get_execution_telemetry(ctx.agent_execution_id)
+                save_chat_message(
+                    self.db,
+                    project_id,
+                    "agent4",
+                    report_msg,
+                    metadata={"qaReport": qa_report_data, "checklist": qa_checklist, "telemetry": qa_telemetry},
+                )
                 if remediation_count < 2:
                     save_chat_message(
                         self.db,
@@ -942,12 +1123,54 @@ class OrchestratorService:
                         f"⚠️ **Agent 4 identified {s['qa_failed_count']} contract test defect(s)**.\n\n"
                         f"Initiating **Agent 3 Autonomous QA Defect Remediation** (Attempt {attempt_num}/2)...",
                     )
+                else:
+                    s["qa_status"] = "FAILED (REMEDIATION_EXHAUSTED)"
+                    save_chat_message(
+                        self.db,
+                        project_id,
+                        "assistant",
+                        "⛔ **Maximum autonomous remediation cycles reached (2/2)**.\n\n"
+                        "Agent 4 still identified contract test defects. Autonomous remediation has stopped to prevent infinite looping. Human review required.",
+                    )
+
+            run.iteration_count = remediation_count
+
+            if not s.get("qa_approved") and (s.get("qa_status") == "PASSED" or remediation_count >= 2):
+                existing_app = (
+                    self.db.query(HumanApprovalORM)
+                    .filter_by(workflow_run_id=run.id, gate_type="QA_VERIFICATION", status="PENDING")
+                    .first()
+                )
+                if not existing_app:
+                    new_app = self.approval_engine.create_approval_request(
+                        workflow_run_id=run.id,
+                        gate_type="QA_VERIFICATION",
+                        prompt_text=f"Agent 4 has completed Independent QA Verification ({s.get('qa_status', 'PASSED')}). Shall I proceed with Security SAST Audit?",
+                    )
+                    save_chat_message(
+                        self.db,
+                        project_id,
+                        "agent4",
+                        "Human approval required to proceed with Security SAST Audit.",
+                        metadata={
+                            "isApprovalCard": True,
+                            "approvalRequired": True,
+                            "approvalId": str(new_app.id),
+                            "gateType": "QA_VERIFICATION",
+                            "status": "PENDING",
+                            "isApproved": False,
+                        },
+                    )
+                s["qa_approved"] = False
 
             self.checkpoint_service.save_checkpoint(run.id, "QA_VERIFICATION", s)
             self.db.commit()
             return s
 
         async def sec_node(s: WorkflowState) -> WorkflowState:
+            if _is_run_cancelled():
+                s["is_cancelled"] = True
+                return s
 
             ctx = _make_context(s, "Agent 5: Security Reviewer", "SECURITY_AUDIT")
 
@@ -959,12 +1182,43 @@ class OrchestratorService:
 
             s["current_phase"] = "SECURITY_AUDIT"
 
+            sec_telemetry = self.tracker.get_execution_telemetry(ctx.agent_execution_id)
+
             save_chat_message(
                 self.db,
                 project_id,
                 "agent5",
                 f"### 🛡️ Security SAST Audit Report\n\n- **Scan Status**: `{s['security_status']}`\n- **Vulnerabilities Found**: `{s['security_findings_count']}`\n\n**Summary**: {res.summary}",
+                metadata={"telemetry": sec_telemetry},
             )
+
+            if not s.get("security_approved"):
+                existing_app = (
+                    self.db.query(HumanApprovalORM)
+                    .filter_by(workflow_run_id=run.id, gate_type="SECURITY_AUDIT", status="PENDING")
+                    .first()
+                )
+                if not existing_app:
+                    new_app = self.approval_engine.create_approval_request(
+                        workflow_run_id=run.id,
+                        gate_type="SECURITY_AUDIT",
+                        prompt_text=f"Agent 5 has completed Security SAST Audit ({s.get('security_status', 'PASSED')}). Shall I proceed to Release Promotion & Manifest generation?",
+                    )
+                    save_chat_message(
+                        self.db,
+                        project_id,
+                        "agent5",
+                        "Human approval required to proceed with Release Promotion.",
+                        metadata={
+                            "isApprovalCard": True,
+                            "approvalRequired": True,
+                            "approvalId": str(new_app.id),
+                            "gateType": "SECURITY_AUDIT",
+                            "status": "PENDING",
+                            "isApproved": False,
+                        },
+                    )
+                s["security_approved"] = False
 
             self.checkpoint_service.save_checkpoint(run.id, "SECURITY_AUDIT", s)
 
@@ -973,6 +1227,9 @@ class OrchestratorService:
             return s
 
         async def release_node(s: WorkflowState) -> WorkflowState:
+            if _is_run_cancelled() or s.get("is_cancelled"):
+                s["is_cancelled"] = True
+                return s
 
             # Generate GitReleaseManifest
 

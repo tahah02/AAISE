@@ -1,0 +1,29 @@
+# Autonomous AI Software Engineer (AAISE) - Core Platform Dependencies
+# Python 3.11+ Enforced Specifications
+
+# Platform Backend & API
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+python-multipart>=0.0.12
+
+# Database & Persistence (SQLAlchemy 2.x & Alembic)
+sqlalchemy>=2.0.36
+alembic>=1.14.0
+
+# Orchestration & Multi-Agent Gateways
+langgraph>=0.2.50
+litellm>=1.52.0
+httpx>=0.28.0
+
+# Document Ingestion & Execution Infrastructure
+pdfplumber>=0.11.0
+docker>=7.1.0
+structlog>=24.4.0
+
+# Testing & Development Quality Gates
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+ruff>=0.8.0
+mypy>=1.13.0

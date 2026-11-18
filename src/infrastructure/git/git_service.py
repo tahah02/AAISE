@@ -23,7 +23,7 @@ from src.domain.enums import RepositoryType
 
 from src.infrastructure.config import Settings
 
-from src.infrastructure.db.models import GitRepositoryORM, GitReleaseManifestORM
+from src.infrastructure.db.models import GitRepositoryORM, GitReleaseManifestORM, ProjectORM
 
 from src.ports.git_service import IGitService
 
@@ -78,6 +78,16 @@ class GitService(IGitService):
 
         return res
 
+    def is_git_enabled(self, project_id: uuid.UUID) -> bool:
+        if self.db:
+            try:
+                proj = self.db.query(ProjectORM).filter_by(id=project_id).first()
+                if proj and getattr(proj, "git_remote_url", None):
+                    return bool(proj.git_remote_url.strip())
+            except Exception:
+                pass
+        return False
+
     def get_repository_path(
         self,
         project_id: uuid.UUID,
@@ -125,41 +135,41 @@ class GitService(IGitService):
 
         # Initialize git repo if not already initialized
 
-        if not (repo_path / ".git").exists():
-            self._run_git(repo_path, ["init", "-b", "main"])
+        framework_key = target_framework.lower()
+        if any(k in framework_key for k in ("py", "python", "fastapi", "django", "flask")):
+            tpl = GITIGNORE_TEMPLATES["python"]
+        elif any(k in framework_key for k in ("cs", "csharp", "net", "dotnet")):
+            tpl = GITIGNORE_TEMPLATES["csharp"]
+        elif any(k in framework_key for k in ("type", "script", "js", "react", "next", "node")):
+            tpl = GITIGNORE_TEMPLATES["typescript"]
+        else:
+            tpl = GITIGNORE_TEMPLATES["generic"]
 
-            # Setup .gitignore
+        gitignore_path = repo_path / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text(tpl, encoding="utf-8")
 
-            framework_key = target_framework.lower()
-
-            if any(k in framework_key for k in ("py", "python", "fastapi", "django", "flask")):
-                tpl = GITIGNORE_TEMPLATES["python"]
-
-            elif any(k in framework_key for k in ("cs", "csharp", "net", "dotnet")):
-                tpl = GITIGNORE_TEMPLATES["csharp"]
-
-            elif any(k in framework_key for k in ("type", "script", "js", "react", "next", "node")):
-                tpl = GITIGNORE_TEMPLATES["typescript"]
-
-            else:
-                tpl = GITIGNORE_TEMPLATES["generic"]
-
-            (repo_path / ".gitignore").write_text(tpl, encoding="utf-8")
-
-            (repo_path / "README.md").write_text(
+        readme_path = repo_path / "README.md"
+        if not readme_path.exists():
+            readme_path.write_text(
                 f"# Project Repository\n\nType: {type_str}\nProject ID: {project_id}\n",
                 encoding="utf-8",
             )
 
-            # Initial commit on main
-
-            self._run_git(repo_path, ["add", "."])
-
-            self._run_git(repo_path, ["commit", "-m", "chore: initial repository structure"])
-
-            # Create develop branch
-
-            self._run_git(repo_path, ["checkout", "-b", "develop"])
+        # Only initialize git if Git is explicitly enabled (remote URL provided) or already initialized
+        if self.is_git_enabled(project_id) or (repo_path / ".git").exists():
+            if not (repo_path / ".git").exists():
+                self._run_git(repo_path, ["init", "-b", "main"])
+                self._run_git(repo_path, ["add", "."])
+                self._run_git(repo_path, ["commit", "-m", "chore: initial repository structure"])
+                self._run_git(repo_path, ["checkout", "-b", "develop"])
+                if self.db:
+                    try:
+                        proj = self.db.query(ProjectORM).filter_by(id=project_id).first()
+                        if proj and getattr(proj, "git_remote_url", None) and proj.git_remote_url.strip():
+                            self._run_git(repo_path, ["remote", "add", "origin", proj.git_remote_url.strip()])
+                    except Exception:
+                        pass
 
         # Persist record in database if not already tracked
 
@@ -193,7 +203,7 @@ class GitService(IGitService):
     ) -> str:
         repo_path = Path(self.get_repository_path(project_id, repo_type))
         if not (repo_path / ".git").exists():
-            raise FileNotFoundError(f"Repository not initialized at {repo_path}")
+            return branch_name
 
         try:
             status_res = self._run_git(repo_path, ["status", "--porcelain"])
@@ -289,7 +299,7 @@ class GitService(IGitService):
         repo_path = Path(self.get_repository_path(project_id, repo_type))
 
         if not (repo_path / ".git").exists():
-            raise FileNotFoundError(f"Repository not initialized at {repo_path}")
+            return "FILE_SAVED"
 
         self._run_git(repo_path, ["add", "."])
 
@@ -309,7 +319,7 @@ class GitService(IGitService):
         repo_path = Path(self.get_repository_path(project_id, repo_type))
 
         if not (repo_path / ".git").exists():
-            raise FileNotFoundError(f"Repository not initialized at {repo_path}")
+            return "FILE_SAVED"
 
         res = self._run_git(repo_path, ["rev-parse", "HEAD"])
 
@@ -397,7 +407,7 @@ class GitService(IGitService):
         repo_path = Path(self.get_repository_path(project_id, repo_type))
 
         if not (repo_path / ".git").exists():
-            raise FileNotFoundError(f"Repository not initialized at {repo_path}")
+            return "FILE_SAVED"
 
         # Ensure clean remote URL format
 

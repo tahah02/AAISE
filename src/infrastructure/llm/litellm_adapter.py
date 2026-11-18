@@ -9,6 +9,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import litellm
 litellm.telemetry = False
 litellm.suppress_debug_info = True
+litellm.drop_params = True
 
 from src.domain.enums import LLMProvider
 from src.domain.exceptions import (

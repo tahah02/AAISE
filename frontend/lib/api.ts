@@ -112,13 +112,13 @@ export async function fetchProjectFileContent(projectId: string, filePath: strin
   }
 }
 
-export async function fetchProjectMessages(projectId: string): Promise<{ run_id: string | null; messages: any[] }> {
+export async function fetchProjectMessages(projectId: string): Promise<{ run_id: string | null; run_status?: string | null; messages: any[] }> {
   try {
     const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/messages`);
-    if (!res.ok) return { run_id: null, messages: [] };
+    if (!res.ok) return { run_id: null, run_status: null, messages: [] };
     return res.json();
   } catch {
-    return { run_id: null, messages: [] };
+    return { run_id: null, run_status: null, messages: [] };
   }
 }
 
@@ -139,7 +139,9 @@ export interface ProjectAgentsResponse {
   project_id: string;
   agents: AgentConfigItem[];
   toggles: {
+    agent1: boolean;
     agent2: boolean;
+    agent3: boolean;
     agent4: boolean;
     agent5: boolean;
   };
@@ -150,19 +152,27 @@ export async function createProject(
   description?: string,
   target_framework?: string,
   custom_workspace_path?: string,
-  agent_toggles?: { agent2?: boolean; agent4?: boolean; agent5?: boolean }
+  agent_toggles?: { agent1?: boolean; agent2?: boolean; agent3?: boolean; agent4?: boolean; agent5?: boolean }
 ): Promise<ProjectItem> {
-  const res = await fetch(`${API_BASE}/api/v1/projects`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name,
-      description,
-      target_framework: target_framework || "PYTHON_FASTAPI",
-      custom_workspace_path: custom_workspace_path || undefined,
-      agent_toggles: agent_toggles || undefined,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/v1/projects`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name,
+        description,
+        target_framework: target_framework || "PYTHON_FASTAPI",
+        custom_workspace_path: custom_workspace_path || undefined,
+        agent_toggles: agent_toggles || undefined,
+      }),
+    });
+  } catch (netErr: any) {
+    throw new Error(
+      `Cannot connect to AAISE backend at ${API_BASE}. Please ensure FastAPI is running (python run_backend.py).`
+    );
+  }
+
   if (!res.ok) {
     let msg = "Failed to create project";
     try {
@@ -189,14 +199,16 @@ export async function fetchProjectAgents(projectId: string): Promise<ProjectAgen
 
 export async function updateProjectAgents(
   projectId: string,
-  toggles: { agent2?: boolean; agent4?: boolean; agent5?: boolean }
+  toggles: { agent1?: boolean; agent2?: boolean; agent3?: boolean; agent4?: boolean; agent5?: boolean }
 ): Promise<ProjectAgentsResponse | null> {
   try {
     const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}/agents`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        agent1_enabled: toggles.agent1,
         agent2_enabled: toggles.agent2,
+        agent3_enabled: toggles.agent3,
         agent4_enabled: toggles.agent4,
         agent5_enabled: toggles.agent5,
         toggles,
@@ -213,47 +225,79 @@ export async function startWorkflow(
   req: WorkflowStartRequest,
   files?: File[]
 ): Promise<WorkflowStartResponse> {
-  if (files && files.length > 0) {
-    const formData = new FormData();
-    if (req.project_id) formData.append("project_id", req.project_id);
-    if (req.project_name) formData.append("project_name", req.project_name);
-    formData.append("user_requirement", req.user_requirement);
-    files.forEach((file) => formData.append("files", file));
+  try {
+    if (files && files.length > 0) {
+      const formData = new FormData();
+      if (req.project_id) formData.append("project_id", req.project_id);
+      if (req.project_name) formData.append("project_name", req.project_name);
+      formData.append("user_requirement", req.user_requirement);
+      files.forEach((file) => formData.append("files", file));
 
-    const res = await fetch(`${API_BASE}/api/v1/workflow/start-multipart`, {
+      const res = await fetch(`${API_BASE}/api/v1/workflow/start-multipart`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`Failed to send message: ${res.status} ${errorText}`);
+      }
+      return res.json();
+    }
+
+    const res = await fetch(`${API_BASE}/api/v1/workflow/start`, {
       method: "POST",
-      body: formData,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
     });
     if (!res.ok) {
       const errorText = await res.text();
       throw new Error(`Failed to send message: ${res.status} ${errorText}`);
     }
     return res.json();
+  } catch (err: any) {
+    if (err.message && err.message.includes("Failed to send message")) {
+      throw err;
+    }
+    throw new Error(`Cannot connect to AAISE backend at ${API_BASE}. Please ensure FastAPI is running (python run_backend.py).`);
   }
-
-  const res = await fetch(`${API_BASE}/api/v1/workflow/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-  });
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Failed to send message: ${res.status} ${errorText}`);
-  }
-  return res.json();
 }
 
 export async function resolveApproval(req: ResolveApprovalRequest): Promise<ResolveApprovalResponse> {
-  const res = await fetch(`${API_BASE}/api/v1/workflow/approval/resolve`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/v1/workflow/approval/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    });
+  } catch (netErr: any) {
+    throw new Error(
+      `Cannot connect to AAISE backend at ${API_BASE}. Please ensure FastAPI is running (python run_backend.py).`
+    );
+  }
   if (!res.ok) {
     const errorText = await res.text();
     throw new Error(`Failed to resolve approval: ${res.status} ${errorText}`);
   }
   return res.json();
+}
+
+export async function cancelWorkflow(runIdOrProjectId: { runId?: string; projectId?: string }): Promise<any> {
+  const url = runIdOrProjectId.runId
+    ? `${API_BASE}/api/v1/workflow/${runIdOrProjectId.runId}/cancel`
+    : `${API_BASE}/api/v1/workflow/cancel?project_id=${runIdOrProjectId.projectId}`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (!res.ok) {
+      return { status: "ERROR" };
+    }
+    return res.json();
+  } catch {
+    return { status: "CANCELLED" };
+  }
 }
 
 export function subscribeToWorkflowStream(
@@ -345,5 +389,232 @@ export async function fetchProjectStatus(
     return res.json();
   } catch {
     return { status: "STOPPED" };
+  }
+}
+
+export interface AnalyticsOverview {
+  total_projects: number;
+  total_runs: number;
+  tokens: {
+    total: number;
+    prompt: number;
+    completion: number;
+    cost_usd: number;
+    invocations: number;
+    avg_latency_ms: number;
+    avg_latency_sec: number;
+  };
+  qa: {
+    total_runs: number;
+    passed_runs: number;
+    failed_runs: number;
+    total_tests: number;
+    passed_tests: number;
+    failed_tests: number;
+    pass_rate_pct: number;
+  };
+  security: {
+    total_scans: number;
+    passed_scans: number;
+    total_findings: number;
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+  approvals: {
+    total: number;
+    pending: number;
+    approved: number;
+    rejected: number;
+  };
+}
+
+export interface AnalyticsInvocationItem {
+  id: string;
+  provider: string;
+  model_name: string;
+  latency_ms: number;
+  latency_sec: number;
+  success: boolean;
+  error_message?: string | null;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  invoked_at: string | null;
+  agent_name: string;
+  task_type?: string;
+  project_id?: string | null;
+  project_name: string;
+}
+
+export interface AnalyticsTokensResponse {
+  totals: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cost_usd: number;
+    calls: number;
+  };
+  by_provider: Array<{
+    provider: string;
+    tokens: number;
+    cost_usd: number;
+    calls: number;
+    avg_latency_ms: number;
+  }>;
+  by_model: Array<{
+    model: string;
+    provider: string;
+    tokens: number;
+    cost_usd: number;
+    calls: number;
+  }>;
+  by_agent: Array<{
+    agent_name: string;
+    tokens: number;
+    cost_usd: number;
+    calls: number;
+  }>;
+  invocations: AnalyticsInvocationItem[];
+}
+
+export interface AnalyticsQAResultItem {
+  id: string;
+  test_key: string;
+  category: string;
+  endpoint: string;
+  http_method: string;
+  expected_status: number;
+  actual_status_code: number;
+  status: string;
+  response_body?: string | null;
+}
+
+export interface AnalyticsQARunItem {
+  id: string;
+  project_id: string;
+  project_name: string;
+  execution_type: string;
+  passed_count: number;
+  failed_count: number;
+  total_count: number;
+  status: string;
+  executed_at: string | null;
+  results: AnalyticsQAResultItem[];
+}
+
+export interface AnalyticsQAReportsResponse {
+  test_runs: AnalyticsQARunItem[];
+}
+
+export interface AnalyticsSecurityFindingItem {
+  id: string;
+  severity: string;
+  vulnerability_type: string;
+  target_repo: string;
+  file_path: string;
+  line_number?: number | null;
+  description: string;
+  remediation_advice: string;
+  status: string;
+  discovered_at: string | null;
+}
+
+export interface AnalyticsSecurityScanItem {
+  id: string;
+  project_id: string;
+  project_name: string;
+  scanner_type: string;
+  status: string;
+  scanned_at: string | null;
+  findings_count: number;
+  findings: AnalyticsSecurityFindingItem[];
+}
+
+export interface AnalyticsSecurityResponse {
+  scans: AnalyticsSecurityScanItem[];
+}
+
+export interface AnalyticsApprovalItem {
+  id: string;
+  workflow_run_id: string;
+  project_id?: string | null;
+  project_name: string;
+  gate_type: string;
+  status: string;
+  prompt_text: string;
+  reviewer_comments?: string | null;
+  requested_at: string | null;
+  resolved_at?: string | null;
+}
+
+export interface AnalyticsApprovalsResponse {
+  approvals: AnalyticsApprovalItem[];
+}
+
+export async function fetchAnalyticsOverview(projectId?: string): Promise<AnalyticsOverview | null> {
+  try {
+    const url = projectId
+      ? `${API_BASE}/api/v1/analytics/overview?project_id=${projectId}`
+      : `${API_BASE}/api/v1/analytics/overview`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchAnalyticsTokens(projectId?: string): Promise<AnalyticsTokensResponse | null> {
+  try {
+    const url = projectId
+      ? `${API_BASE}/api/v1/analytics/tokens?project_id=${projectId}`
+      : `${API_BASE}/api/v1/analytics/tokens`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchAnalyticsQAReports(projectId?: string): Promise<AnalyticsQAReportsResponse | null> {
+  try {
+    const url = projectId
+      ? `${API_BASE}/api/v1/analytics/qa-reports?project_id=${projectId}`
+      : `${API_BASE}/api/v1/analytics/qa-reports`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchAnalyticsSecurity(projectId?: string): Promise<AnalyticsSecurityResponse | null> {
+  try {
+    const url = projectId
+      ? `${API_BASE}/api/v1/analytics/security?project_id=${projectId}`
+      : `${API_BASE}/api/v1/analytics/security`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchAnalyticsApprovals(projectId?: string): Promise<AnalyticsApprovalsResponse | null> {
+  try {
+    const url = projectId
+      ? `${API_BASE}/api/v1/analytics/approvals?project_id=${projectId}`
+      : `${API_BASE}/api/v1/analytics/approvals`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
   }
 }
