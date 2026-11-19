@@ -404,6 +404,13 @@ export interface AnalyticsOverview {
     avg_latency_ms: number;
     avg_latency_sec: number;
   };
+  projects_summary?: Array<{
+    id: string;
+    name: string;
+    target_framework: string;
+    tokens: number;
+    invocations: number;
+  }>;
   qa: {
     total_runs: number;
     passed_runs: number;
@@ -436,6 +443,9 @@ export interface AnalyticsInvocationItem {
   model_name: string;
   latency_ms: number;
   latency_sec: number;
+  llm_latency_sec?: number;
+  task_duration_sec?: number | null;
+  task_duration_label?: string | null;
   success: boolean;
   error_message?: string | null;
   prompt_tokens: number;

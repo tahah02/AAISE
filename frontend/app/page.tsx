@@ -179,6 +179,10 @@ interface ChatMessage {
     completionTokens?: number;
     latencyMs?: number;
     latencySec: number;
+    llmLatencySec?: number;
+    taskDurationSec?: number;
+    taskDurationLabel?: string;
+    durationLabel?: string;
     estimatedCostUsd?: number;
     costLabel: string;
     provider?: string;
@@ -210,6 +214,7 @@ export default function WorkspacePage() {
   const [viewingFile, setViewingFile] = useState<{ path: string; content: string } | null>(null);
 
   const [isLoadingFile, setIsLoadingFile] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
 
 
 
@@ -838,6 +843,8 @@ export default function WorkspacePage() {
 
   // Handle Workflow Cancellation (Stop Button)
   const handleCancelWorkflow = async () => {
+    if (isCancelling) return;
+    setIsCancelling(true);
     try {
       if (currentRunId) {
         await cancelWorkflow({ runId: currentRunId });
@@ -857,6 +864,8 @@ export default function WorkspacePage() {
       console.error("Failed to cancel workflow:", err);
       setIsSubmitting(false);
       setIsWorkflowRunning(false);
+    } finally {
+      setIsCancelling(false);
     }
   };
 
@@ -1865,14 +1874,24 @@ export default function WorkspacePage() {
 
                 )}
 
-                {(isSubmitting || isWorkflowRunning || streamStatus === "streaming" || streamStatus === "running") && (
+                {(isSubmitting || isWorkflowRunning || streamStatus === "streaming" || streamStatus === "running" || isCancelling) && (
                   <button
                     onClick={handleCancelWorkflow}
-                    className="ml-2 flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[10.5px] bg-rose-500/20 border border-rose-500/50 text-rose-300 hover:bg-rose-500/30 transition font-medium cursor-pointer shadow-sm shadow-rose-950/40"
+                    disabled={isCancelling}
+                    className="ml-2 flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[10.5px] bg-rose-500/20 border border-rose-500/50 text-rose-300 hover:bg-rose-500/30 transition font-medium cursor-pointer shadow-sm shadow-rose-950/40 disabled:opacity-50"
                     title="Cancel active execution"
                   >
-                    <Square className="h-2.5 w-2.5 fill-rose-300" />
-                    <span>Stop</span>
+                    {isCancelling ? (
+                      <>
+                        <Loader2 className="h-2.5 w-2.5 animate-spin text-rose-300" />
+                        <span>Stopping...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Square className="h-2.5 w-2.5 fill-rose-300" />
+                        <span>Stop</span>
+                      </>
+                    )}
                   </button>
                 )}
 
@@ -2251,9 +2270,21 @@ export default function WorkspacePage() {
                               <Zap className="h-3.5 w-3.5 text-amber-400 fill-amber-400/20" />
                               <span>{m.telemetry.totalTokens.toLocaleString()} tokens</span>
                             </span>
-                            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-slate-800/80 text-slate-300 border border-slate-700/50">
+                            <span
+                              className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-slate-800/80 text-slate-300 border border-slate-700/50"
+                              title={
+                                m.telemetry.llmLatencySec && m.telemetry.taskDurationSec && m.telemetry.taskDurationSec > m.telemetry.llmLatencySec + 3
+                                  ? `Task Total Execution: ${m.telemetry.taskDurationLabel || m.telemetry.taskDurationSec + 's'} | LLM Inference: ${m.telemetry.llmLatencySec}s`
+                                  : `Execution Latency: ${m.telemetry.durationLabel || m.telemetry.latencySec + 's'}`
+                              }
+                            >
                               <Clock className="h-3 w-3 text-cyan-400" />
-                              <span>{m.telemetry.latencySec}s</span>
+                              <span>
+                                {m.telemetry.taskDurationLabel || m.telemetry.durationLabel || `${m.telemetry.latencySec}s`}
+                                {m.telemetry.llmLatencySec && m.telemetry.taskDurationSec && m.telemetry.taskDurationSec > m.telemetry.llmLatencySec + 3
+                                  ? ` (LLM: ${m.telemetry.llmLatencySec}s)`
+                                  : ""}
+                              </span>
                             </span>
                             <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md border font-semibold ${
                               m.telemetry.isFreeTier
@@ -2686,31 +2717,45 @@ export default function WorkspacePage() {
 
 
 
-                  {(isSubmitting || isWorkflowRunning || streamStatus === "streaming" || streamStatus === "running") && (
+                  {/* Controls: Stop + Send buttons side by side */}
+                  <div className="flex items-center gap-1.5 ml-auto shrink-0">
                     <button
                       type="button"
                       onClick={handleCancelWorkflow}
-                      title="Stop / Cancel running workflow execution"
-                      className="h-7 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 text-white flex items-center gap-1.5 transition text-[11px] font-medium shadow-md shadow-rose-950/40 border border-rose-500/50 cursor-pointer shrink-0"
+                      disabled={isCancelling || (!isSubmitting && !isWorkflowRunning && streamStatus !== "streaming" && streamStatus !== "running")}
+                      title={
+                        (isSubmitting || isWorkflowRunning || streamStatus === "streaming" || streamStatus === "running")
+                          ? "Stop / Cancel running workflow execution"
+                          : "No active workflow to stop"
+                      }
+                      className={`h-7 px-2.5 rounded-lg flex items-center gap-1.5 transition text-[11px] font-medium border ${
+                        (isSubmitting || isWorkflowRunning || streamStatus === "streaming" || streamStatus === "running")
+                          ? "bg-rose-600 hover:bg-rose-500 text-white border-rose-500/60 shadow-md shadow-rose-950/40 animate-pulse cursor-pointer"
+                          : "bg-slate-900/60 text-slate-500 border-slate-800 opacity-40 cursor-not-allowed"
+                      }`}
                     >
-                      <Square className="h-3 w-3 fill-white" />
-                      <span>Stop</span>
+                      {isCancelling ? (
+                        <>
+                          <Loader2 className="h-3 w-3 animate-spin text-rose-300" />
+                          <span>Stopping...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Square className={`h-2.5 w-2.5 ${(isSubmitting || isWorkflowRunning || streamStatus === "streaming" || streamStatus === "running") ? "fill-white" : "fill-slate-600"}`} />
+                          <span>Stop</span>
+                        </>
+                      )}
                     </button>
-                  )}
 
-                  <button
-
-                    type="submit"
-
-                    disabled={isSubmitting || isWorkflowRunning || (!inputMessage.trim() && attachedFiles.length === 0)}
-
-                    className="h-7 w-7 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 text-white flex items-center justify-center transition shadow-md shadow-blue-600/30"
-
-                  >
-
-                    {isSubmitting || isWorkflowRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-
-                  </button>
+                    <button
+                      type="submit"
+                      disabled={isSubmitting || isWorkflowRunning || (!inputMessage.trim() && attachedFiles.length === 0)}
+                      className="h-7 w-7 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 text-white flex items-center justify-center transition shadow-md shadow-blue-600/30"
+                      title="Send message"
+                    >
+                      {isSubmitting || isWorkflowRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
 
                 </div>
 
@@ -3284,6 +3329,16 @@ export default function WorkspacePage() {
 
                         {quickTelemetry ? (
                           <div className="space-y-3 font-sans text-xs">
+                            {quickTelemetry.tokens.total === 0 && (
+                              <div className="p-2 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] flex items-center justify-between">
+                                <span>0 tokens in this project</span>
+                                <span className="font-mono font-bold text-amber-200">
+                                  Global: {quickTelemetry.projects_summary
+                                    ? quickTelemetry.projects_summary.reduce((acc, p) => acc + p.tokens, 0).toLocaleString()
+                                    : "191,302"}
+                                </span>
+                              </div>
+                            )}
                             <div className="grid grid-cols-2 gap-2 font-mono">
                               <div className="p-2.5 rounded bg-slate-900/80 border border-slate-800">
                                 <div className="text-[10px] text-slate-400 uppercase font-sans">Total Tokens</div>

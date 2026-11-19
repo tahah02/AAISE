@@ -17,6 +17,37 @@ Progress is tracked strictly through verifiable architectural milestones, not ar
 
 ---
 
+### [2026-11-19] Step 13: Live Telemetry Aggregation, Dual-Duration Resolution & Observability Portal Fix (Completed)
+- **Problem & Root Cause Resolved**:
+  - The user observed that the portal displayed (0) across telemetry tabs when viewing project SRS2, and that duration was reported as 16 secs on messages when Agent 3 (Main Coder) and Agent 4 (QA) actually spent 3-4 minutes compiling, restoring packages, and executing tests.
+  - **Root Cause 1 (Duration Mismatch)**: latency_ms on LLMInvocationORM tracked only the raw LLM inference time (16s), not the subsequent physical file writes, git operations, dotnet restore, dotnet build, self-healing repairs, and ephemeral web server execution (3-4 minutes).
+  - **Root Cause 2 (Telemetry Swallowing)**: In src/infrastructure/llm/token_tracker.py, subtracting SQLite's naive exec_row.started_at from Python's timezone-aware utc_now() raised TypeError: can't subtract offset-naive and offset-aware datetimes, which caused telemetry in new messages to become None.
+  - **Root Cause 3 (Portal Aggregation & Display)**: Hot reload was missing in the backend launcher, and the portal modal container lacked a minimum height when filtering projects with zero recorded runs.
+- **Implementation & Enhancements**:
+  - **Dual-Duration Engine (token_tracker.py & src/api/routes/analytics.py)**:
+    - Normalized all SQLite datetimes to naive UTC before arithmetic.
+    - Extracted authentic task execution time from (exec_row.finished_at - exec_row.started_at).
+    - Formatted dual-duration label (e.g. 3m 42s (LLM: 16.0s)), exposing both task_duration_sec, task_duration_label, and llm_latency_sec.
+  - **Full Telemetry Aggregation & Global Projects Summary**:
+    - In src/api/routes/analytics.py: Added projects_summary to /overview endpoint showing token counts and invocation totals per project across the global database (191,302 tokens total).
+    - Updated get_analytics_tokens to return dual-duration fields for every invocation.
+  - **Frontend Observability & Telemetry Enhancements**:
+    - In frontend/lib/api.ts: Updated AnalyticsOverview with projects_summary and AnalyticsInvocationItem with dual-duration fields.
+    - In frontend/components/AnalyticsDashboardModal.tsx:
+      - Updated project dropdown to display token counts per project (e.g. SRS2 (57k tokens), All Projects (Global)).
+      - Added empty project banner with a one-click button to switch to All Projects (Global).
+      - Enhanced the Tokens & Invocations table Latency column to clearly show the full task duration alongside the raw LLM inference latency.
+      - Enforced a minimum modal height (min-h-[550px]) to ensure the portal never appears collapsed.
+    - In frontend/app/page.tsx:
+      - Updated chat message telemetry badges to display the authentic task duration (e.g. 3m 42s (LLM: 16s)).
+      - In the right-hand panel Telemetry view, added global token fallback when viewing a project with 0 runs.
+- **Verification Evidence**:
+  - TypeScript check: passed with 0 errors (npx tsc --noEmit).
+  - Unit test suite tests/unit/test_analytics.py verifying empty database and seeded data with dual-duration calculation: 2 passed in 0.72s.
+  - Backend hot-reload enabled via uvicorn.run("src.api.main:app", host="0.0.0.0", port=8081, reload=True).
+
+---
+
 ### [2026-11-18] Step 12: Next.js Observability & Telemetry Portal UI (Completed)
 - **Problem & Requirement**:
   - The user requested a complete Next.js dashboard/portal to view platform token usage, estimated costs ($ USD), LLM latencies, Agent 4 QA black-box contract reports, Agent 5 security audits, and Human-in-the-Loop approval histories directly from `./data/aaise.db`.

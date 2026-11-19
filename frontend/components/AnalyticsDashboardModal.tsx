@@ -140,7 +140,7 @@ export function AnalyticsDashboardModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 sm:p-6 animate-in fade-in duration-200">
-      <div className="relative w-full max-w-6xl max-h-[92vh] flex flex-col bg-[#0b0f19] border border-slate-800 rounded-xl shadow-2xl overflow-hidden font-sans text-slate-200">
+      <div className="relative w-full max-w-6xl max-h-[92vh] min-h-[550px] flex flex-col bg-[#0b0f19] border border-slate-800 rounded-xl shadow-2xl overflow-hidden font-sans text-slate-200">
         
         {/* Top Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-[#0d1322]">
@@ -170,14 +170,20 @@ export function AnalyticsDashboardModal({
               <select
                 value={filterProjectId}
                 onChange={(e) => setFilterProjectId(e.target.value)}
-                className="bg-[#141b2d] border border-slate-700/80 rounded-md px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 transition cursor-pointer"
+                className="bg-[#141b2d] border border-slate-700/80 rounded-md px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 transition cursor-pointer font-medium"
               >
-                <option value="all">All Projects (Global)</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
+                <option value="all">
+                  All Projects (Global)
+                </option>
+                {projects.map((p) => {
+                  const summary = overview?.projects_summary?.find((s) => s.id === p.id);
+                  const tokenCount = summary ? summary.tokens.toLocaleString() : null;
+                  return (
+                    <option key={p.id} value={p.id}>
+                      {p.name} {tokenCount !== null ? `(${tokenCount} tokens)` : ""}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
@@ -289,6 +295,18 @@ export function AnalyticsDashboardModal({
               {/* TAB 1: EXECUTIVE OVERVIEW */}
               {activeTab === "overview" && overview && (
                 <div className="space-y-6">
+                  {overview.tokens.total === 0 && filterProjectId !== "all" && (
+                    <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs flex items-center justify-between">
+                      <span>No runs or tokens recorded for this project yet.</span>
+                      <button
+                        onClick={() => setFilterProjectId("all")}
+                        className="underline hover:text-white font-semibold transition"
+                      >
+                        Switch to All Projects (Global)
+                      </button>
+                    </div>
+                  )}
+
                   {/* Top KPI Cards */}
                   <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                     <div className="p-4 rounded-lg bg-[#111827]/80 border border-amber-500/20">
@@ -510,7 +528,14 @@ export function AnalyticsDashboardModal({
                                   </span>
                                 </td>
                                 <td className="px-3 py-2.5 text-cyan-300">
-                                  {inv.latency_sec}s
+                                  <div className="font-medium">
+                                    {inv.task_duration_label || `${inv.latency_sec}s`}
+                                  </div>
+                                  {inv.llm_latency_sec && inv.task_duration_sec && inv.task_duration_sec > inv.llm_latency_sec ? (
+                                    <div className="text-[10px] text-slate-500 font-sans">
+                                      LLM: {inv.llm_latency_sec}s
+                                    </div>
+                                  ) : null}
                                 </td>
                                 <td className="px-3 py-2.5 text-right text-slate-400">
                                   {inv.prompt_tokens.toLocaleString()}

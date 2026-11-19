@@ -6,6 +6,7 @@ from sqlalchemy import func, desc
 
 from src.infrastructure.db.session import get_db
 from src.infrastructure.db.models import (
+    utc_now,
     ProjectORM,
     WorkflowRunORM,
     TokenUsageORM,
@@ -122,6 +123,35 @@ def get_analytics_overview(
     app_approved = sum(1 for a in approvals if a.status == "APPROVED")
     app_rejected = sum(1 for a in approvals if a.status == "REJECTED")
 
+    # Project-level breakdown summary
+    proj_summary = []
+    all_projs = db.query(ProjectORM).order_by(ProjectORM.name.asc()).all()
+    for p in all_projs:
+        tok_q = (
+            db.query(func.coalesce(func.sum(TokenUsageORM.total_tokens), 0))
+            .select_from(TokenUsageORM)
+            .join(LLMInvocationORM, TokenUsageORM.llm_invocation_id == LLMInvocationORM.id)
+            .join(AgentExecutionORM, LLMInvocationORM.agent_execution_id == AgentExecutionORM.id)
+            .join(AgentTaskORM, AgentExecutionORM.agent_task_id == AgentTaskORM.id)
+            .filter(AgentTaskORM.project_id == p.id)
+            .scalar()
+        )
+        inv_q = (
+            db.query(func.count(LLMInvocationORM.id))
+            .select_from(LLMInvocationORM)
+            .join(AgentExecutionORM, LLMInvocationORM.agent_execution_id == AgentExecutionORM.id)
+            .join(AgentTaskORM, AgentExecutionORM.agent_task_id == AgentTaskORM.id)
+            .filter(AgentTaskORM.project_id == p.id)
+            .scalar()
+        )
+        proj_summary.append({
+            "id": str(p.id),
+            "name": p.name,
+            "target_framework": p.target_framework,
+            "tokens": int(tok_q or 0),
+            "invocations": int(inv_q or 0),
+        })
+
     return {
         "total_projects": total_projects,
         "total_runs": total_runs,
@@ -134,6 +164,7 @@ def get_analytics_overview(
             "avg_latency_ms": avg_latency_ms,
             "avg_latency_sec": round(avg_latency_ms / 1000.0, 2),
         },
+        "projects_summary": proj_summary,
         "qa": {
             "total_runs": qa_total_runs,
             "passed_runs": qa_passed_runs,
@@ -185,6 +216,8 @@ def get_analytics_tokens(
             AgentTaskORM.task_type,
             ProjectORM.id.label("project_id"),
             ProjectORM.name.label("project_name"),
+            AgentExecutionORM.started_at.label("exec_started_at"),
+            AgentExecutionORM.finished_at.label("exec_finished_at"),
         )
         .select_from(LLMInvocationORM)
         .outerjoin(TokenUsageORM, LLMInvocationORM.id == TokenUsageORM.llm_invocation_id)
@@ -246,12 +279,34 @@ def get_analytics_tokens(
         by_agent[agent]["cost_usd"] += cost
         by_agent[agent]["calls"] += 1
 
+        # Compute task execution duration vs LLM inference latency
+        task_duration_sec = None
+        task_duration_label = None
+        if r.exec_started_at:
+            now = utc_now()
+            finish_dt = r.exec_finished_at or (r.invoked_at if r.invoked_at else now)
+            start_naive = r.exec_started_at.replace(tzinfo=None) if r.exec_started_at.tzinfo else r.exec_started_at
+            finish_naive = finish_dt.replace(tzinfo=None) if finish_dt.tzinfo else finish_dt
+            raw_elapsed = (finish_naive - start_naive).total_seconds()
+            if 0.1 <= raw_elapsed <= 3600:
+                task_duration_sec = round(raw_elapsed, 1)
+                if task_duration_sec >= 60:
+                    task_duration_label = f"{int(task_duration_sec // 60)}m {int(task_duration_sec % 60)}s"
+                else:
+                    task_duration_label = f"{task_duration_sec}s"
+
+        llm_latency_sec = round((r.latency_ms or 0) / 1000.0, 2)
+        effective_duration_label = task_duration_label if task_duration_label else f"{llm_latency_sec}s"
+
         invocations.append({
             "id": str(r.inv_id),
             "provider": provider,
             "model_name": model,
             "latency_ms": r.latency_ms or 0,
-            "latency_sec": round((r.latency_ms or 0) / 1000.0, 2),
+            "latency_sec": task_duration_sec if task_duration_sec else llm_latency_sec,
+            "llm_latency_sec": llm_latency_sec,
+            "task_duration_sec": task_duration_sec,
+            "task_duration_label": effective_duration_label,
             "success": r.success,
             "error_message": r.error_message,
             "prompt_tokens": p_toks,

@@ -252,6 +252,36 @@ class OrchestratorService:
                 .first()
             )
 
+        # Determine specific revision target gate if user requested changes
+        is_spec_revision = False
+        is_mock_revision = False
+        is_dev_revision = False
+        is_qa_revision = False
+        is_security_revision = False
+
+        if is_revision_intent:
+            if any(k in cleaned_req for k in ("qa_verification", "test it again", "retest", "test again", "qa again", "run qa")):
+                is_qa_revision = True
+            elif "development" in cleaned_req:
+                is_dev_revision = True
+            elif "mock_development" in cleaned_req or "mock vendor" in cleaned_req:
+                is_mock_revision = True
+            elif "security_audit" in cleaned_req or "security" in cleaned_req:
+                is_security_revision = True
+            elif "specification" in cleaned_req or "update spec" in cleaned_req or "change database" in cleaned_req:
+                is_spec_revision = True
+            else:
+                if run and run.current_phase == "QA_VERIFICATION":
+                    is_qa_revision = True
+                elif run and run.current_phase == "DEVELOPMENT":
+                    is_dev_revision = True
+                elif run and run.current_phase == "MOCK_DEVELOPMENT":
+                    is_mock_revision = True
+                elif run and run.current_phase == "SECURITY_AUDIT":
+                    is_security_revision = True
+                else:
+                    is_spec_revision = True
+
         existing_approvals = []
         if run:
             existing_approvals = (
@@ -263,19 +293,43 @@ class OrchestratorService:
         is_spec_approved = (
             any(a.gate_type == "SPECIFICATION" and a.status == "APPROVED" for a in existing_approvals)
             or (is_approved_intent and tdd_check.exists())
+            or (tdd_check.exists() and not is_spec_revision)
         )
-        if is_revision_intent:
+        if is_spec_revision:
             is_spec_approved = False
 
         is_mock_approved = any(a.gate_type == "MOCK_DEVELOPMENT" and a.status == "APPROVED" for a in existing_approvals)
+        if is_mock_revision:
+            is_mock_approved = False
+
         is_code_approved = any(a.gate_type == "DEVELOPMENT" and a.status == "APPROVED" for a in existing_approvals)
+        if is_dev_revision:
+            is_code_approved = False
+
         is_qa_approved = any(a.gate_type == "QA_VERIFICATION" and a.status == "APPROVED" for a in existing_approvals)
+        if is_qa_revision:
+            is_qa_approved = False
+
         is_security_approved = any(a.gate_type == "SECURITY_AUDIT" and a.status == "APPROVED" for a in existing_approvals)
+        if is_security_revision:
+            is_security_approved = False
+
+        target_phase = "SPECIFICATION"
+        if is_qa_revision:
+            target_phase = "QA_VERIFICATION"
+        elif is_dev_revision:
+            target_phase = "DEVELOPMENT"
+        elif is_mock_revision:
+            target_phase = "MOCK_DEVELOPMENT"
+        elif is_security_revision:
+            target_phase = "SECURITY_AUDIT"
+        elif is_spec_approved:
+            target_phase = "DEVELOPMENT"
 
         if not run or run.status in ("COMPLETED", "FAILED"):
             run = WorkflowRunORM(
                 project_id=project_id,
-                current_phase="DEVELOPMENT" if is_spec_approved else "SPECIFICATION",
+                current_phase=target_phase,
                 status="RUNNING",
             )
 
@@ -285,9 +339,7 @@ class OrchestratorService:
 
         else:
             run.status = "RUNNING"
-
-            if is_spec_approved:
-                run.current_phase = "DEVELOPMENT"
+            run.current_phase = target_phase
 
             self.db.flush()
 
@@ -368,7 +420,7 @@ class OrchestratorService:
             "mock_repo_path": mock_repo_path,
             "defect_remediation_count": persisted_iterations,
             "spec_approved": is_spec_approved,
-            "spec_approval_comments": user_requirement if is_revision_intent else None,
+            "spec_approval_comments": user_requirement if is_spec_revision else None,
             "mock_approved": is_mock_approved,
             "code_approved": is_code_approved,
             "qa_approved": is_qa_approved,
@@ -474,7 +526,15 @@ class OrchestratorService:
             if not tdd_disk.exists() or not is_approved_intent:
                 ctx = _make_context(s, "Agent 1: Documentation Reviewer", "SPECIFICATION")
 
-                res = await agent1.execute(ctx, s["user_requirement"])
+                prompt_input = s["user_requirement"]
+                comments = s.get("spec_approval_comments")
+                if is_revision_intent and comments:
+                    prompt_input = (
+                        f"### User Requested Changes for SPECIFICATION:\n{comments}\n\n"
+                        f"Please revise the specifications accordingly, strictly preserving the established base scope."
+                    )
+
+                res = await agent1.execute(ctx, prompt_input)
                 if res.metadata.get("target_framework"):
                     s["target_framework"] = res.metadata["target_framework"]
 
@@ -719,7 +779,7 @@ class OrchestratorService:
                 or any(app_dir.glob("*.csproj"))
             )
 
-            if is_qa_or_sec_only and has_existing_code:
+            if (is_qa_or_sec_only or is_qa_revision) and has_existing_code and s.get("code_approved"):
                 s["build_success"] = True
 
                 s["current_phase"] = "DEVELOPMENT"

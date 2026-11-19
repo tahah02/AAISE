@@ -346,9 +346,17 @@ def get_orchestrator(db: Session = Depends(get_db)) -> OrchestratorService:
     return OrchestratorService(db=db, resolver=resolver, git_service=git_service, tracker=tracker)
 
 
+ACTIVE_WORKFLOW_TASKS: dict[uuid.UUID, asyncio.Task] = {}
+
+
 async def _run_orchestrator_job(
     project_id: uuid.UUID, requirement: str, run_id: uuid.UUID | None = None
 ):
+    current_t = asyncio.current_task()
+    if run_id and current_t:
+        ACTIVE_WORKFLOW_TASKS[run_id] = current_t
+    if current_t:
+        ACTIVE_WORKFLOW_TASKS[project_id] = current_t
 
     db = SessionLocal()
 
@@ -367,6 +375,16 @@ async def _run_orchestrator_job(
             project_id=project_id, user_requirement=requirement, workflow_run_id=run_id
         )
 
+    except asyncio.CancelledError:
+        logger.info(f"Background orchestrator task {run_id or project_id} was cancelled.")
+        try:
+            if run_id:
+                r = db.query(WorkflowRunORM).filter_by(id=run_id).first()
+                if r:
+                    r.status = "CANCELLED"
+                    db.commit()
+        except Exception:
+            pass
     except Exception as e:
         print(f"Background orchestrator failed: {e}")
 
@@ -377,6 +395,10 @@ async def _run_orchestrator_job(
             pass
 
     finally:
+        if run_id and run_id in ACTIVE_WORKFLOW_TASKS:
+            ACTIVE_WORKFLOW_TASKS.pop(run_id, None)
+        if project_id in ACTIVE_WORKFLOW_TASKS:
+            ACTIVE_WORKFLOW_TASKS.pop(project_id, None)
         db.close()
 
 
@@ -1554,27 +1576,44 @@ async def cancel_workflow_run(
     run_id: uuid.UUID,
     db: Session = Depends(get_db),
 ):
+    print("[DEBUG CANCEL] 1. Enter cancel_workflow_run", flush=True)
     run = db.query(WorkflowRunORM).filter_by(id=run_id).first()
+    print("[DEBUG CANCEL] 2. Queried run:", run, flush=True)
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow run not found.")
 
+    already_cancelled = (run.status == "CANCELLED")
     run.status = "CANCELLED"
     db.commit()
+    print("[DEBUG CANCEL] 3. db.commit() done", flush=True)
 
+    # 1. Instantly interrupt in-flight asyncio task
+    task = ACTIVE_WORKFLOW_TASKS.get(run_id) or ACTIVE_WORKFLOW_TASKS.get(run.project_id)
+    if task and not task.done():
+        task.cancel()
+    print("[DEBUG CANCEL] 4. task cancelled", flush=True)
+
+    # 2. Terminate background processes via singleton instance
     try:
         from src.infrastructure.execution.process_manager import ProjectProcessManager
-        pm = ProjectProcessManager()
+        pm = ProjectProcessManager.get_instance()
+        print("[DEBUG CANCEL] 5. Stopping project channel-app", flush=True)
         pm.stop_project(run.project_id, "channel-app")
+        print("[DEBUG CANCEL] 6. Stopping project mock-vendor-api", flush=True)
         pm.stop_project(run.project_id, "mock-vendor-api")
     except Exception as e:
         logger.warning(f"Error terminating project processes during cancel: {e}")
+    print("[DEBUG CANCEL] 7. Project processes stopped", flush=True)
 
-    save_chat_message(
-        db,
-        run.project_id,
-        "assistant",
-        "⏹️ **Workflow Execution Stopped**: Multi-agent workflow execution was cancelled by user.",
-    )
+    # 3. Guard against duplicate stopped messages
+    if not already_cancelled:
+        save_chat_message(
+            db,
+            run.project_id,
+            "assistant",
+            "⏹️ **Workflow Execution Stopped**: Multi-agent workflow execution was cancelled by user.",
+        )
+    print("[DEBUG CANCEL] 8. save_chat_message done", flush=True)
 
     return {
         "status": "CANCELLED",
@@ -1598,23 +1637,32 @@ async def cancel_workflow_for_project(
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No workflow run found for this project.")
 
+    already_cancelled = (run.status == "CANCELLED")
     run.status = "CANCELLED"
     db.commit()
 
+    # 1. Instantly interrupt in-flight asyncio task
+    task = ACTIVE_WORKFLOW_TASKS.get(run.id) or ACTIVE_WORKFLOW_TASKS.get(project_id)
+    if task and not task.done():
+        task.cancel()
+
+    # 2. Terminate background processes via singleton instance
     try:
         from src.infrastructure.execution.process_manager import ProjectProcessManager
-        pm = ProjectProcessManager()
+        pm = ProjectProcessManager.get_instance()
         pm.stop_project(project_id, "channel-app")
         pm.stop_project(project_id, "mock-vendor-api")
     except Exception as e:
         logger.warning(f"Error terminating project processes during cancel: {e}")
 
-    save_chat_message(
-        db,
-        project_id,
-        "assistant",
-        "⏹️ **Workflow Execution Stopped**: Multi-agent workflow execution was cancelled by user.",
-    )
+    # 3. Guard against duplicate stopped messages
+    if not already_cancelled:
+        save_chat_message(
+            db,
+            project_id,
+            "assistant",
+            "⏹️ **Workflow Execution Stopped**: Multi-agent workflow execution was cancelled by user.",
+        )
 
     return {
         "status": "CANCELLED",

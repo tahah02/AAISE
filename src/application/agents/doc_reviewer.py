@@ -3,10 +3,11 @@ import logging
 from pathlib import Path
 from sqlalchemy.orm import Session
 
+from src.application.orchestration.history_helper import fetch_conversation_history
 from src.domain.agent_base import BaseAgent
 from src.domain.enums import AgentType
 from src.domain.tools import execute_file_write, get_file_write_tool
-from src.infrastructure.db.models import ProjectFileORM, ProjectORM
+from src.infrastructure.db.models import ConversationORM, MessageORM, ProjectFileORM, ProjectORM
 from src.infrastructure.llm.provider_resolver import LLMProviderResolver
 from src.infrastructure.llm.token_tracker import TokenTrackerService
 from src.ports.agent import AgentContext, AgentResult
@@ -78,6 +79,27 @@ YOUR HIGHEST PRIORITY DIRECTIVES:
             except Exception as e:
                 logger.warning(f"Could not read existing test spec: {e}")
 
+        conversation_history: list = []
+        original_req = ""
+        if self.db and context.project_id:
+            try:
+                conversation_history = fetch_conversation_history(self.db, context.project_id, max_turns=6)
+                proj = self.db.query(ProjectORM).filter_by(id=context.project_id).first()
+                if proj and proj.description:
+                    original_req = proj.description
+                if not original_req:
+                    first_msg = (
+                        self.db.query(MessageORM)
+                        .join(ConversationORM)
+                        .filter(ConversationORM.project_id == context.project_id, MessageORM.sender_type == "user")
+                        .order_by(MessageORM.created_date.asc())
+                        .first()
+                    )
+                    if first_msg:
+                        original_req = first_msg.content
+            except Exception as e:
+                logger.warning(f"Could not load conversation history or original requirement: {e}")
+
         resolved_config = self.resolver.resolve_agent_config(
             session=self.db,
             project_id=context.project_id,
@@ -115,9 +137,18 @@ YOUR HIGHEST PRIORITY DIRECTIVES:
         else:
             tdd_user_content = input_text
             if existing_tdd:
+                base_scope = (
+                    f"## Original Base Requirements (ABSOLUTE BOUNDARY & SOURCE OF TRUTH):\n{original_req}\n\n"
+                    if original_req
+                    else ""
+                )
                 tdd_user_content = (
+                    f"{base_scope}"
                     f"## Current Technical Design on Disk:\n\n{existing_tdd}\n\n"
                     f"## MANDATORY USER REVISION REQUEST & REQUIRED CORRECTIONS:\n\n{input_text}\n\n"
+                    f"CRITICAL REVISION DIRECTIVES:\n"
+                    f"1. DO NOT invent or add new endpoints, entities, or CRUD actions beyond what was originally required in the Base Requirements above. Strictly preserve single-entity or constrained scopes.\n"
+                    f"2. Only apply the specific modifications requested in the User Revision Request above.\n"
                     f"Update and expand docs/TECHNICAL_DESIGN.md to incorporate every single requested correction. Do NOT abbreviate."
                 )
 
@@ -155,6 +186,7 @@ YOUR HIGHEST PRIORITY DIRECTIVES:
             fallback_model=resolved_config.fallback_model,
             messages=[
                 {"role": "system", "content": self.get_system_prompt(context)},
+                *conversation_history,
                 {"role": "user", "content": prompt_tdd},
             ],
             temperature=0.2,
@@ -194,9 +226,17 @@ YOUR HIGHEST PRIORITY DIRECTIVES:
         else:
             test_user_content = input_text
             if existing_test_spec:
+                base_scope = (
+                    f"## Original Base Requirements (ABSOLUTE BOUNDARY & SOURCE OF TRUTH):\n{original_req}\n\n"
+                    if original_req
+                    else ""
+                )
                 test_user_content = (
+                    f"{base_scope}"
                     f"## Current Test Specification on Disk:\n\n{existing_test_spec}\n\n"
                     f"## MANDATORY USER REVISION REQUEST & REQUIRED CORRECTIONS:\n\n{input_text}\n\n"
+                    f"CRITICAL REVISION DIRECTIVES:\n"
+                    f"1. Strictly align test cases with the original scope and revised Technical Design. Do not introduce tests for non-existent or unrequested endpoints.\n"
                     f"Update and expand docs/XUNIT_TEST_SPEC.md to incorporate every single requested correction. Apply all revisions explicitly."
                 )
 
@@ -232,6 +272,7 @@ YOUR HIGHEST PRIORITY DIRECTIVES:
             fallback_model=resolved_config.fallback_model,
             messages=[
                 {"role": "system", "content": "You are a Principal Lead QA Architect specializing in xUnit testing and contract verification."},
+                *conversation_history,
                 {"role": "user", "content": prompt_test},
             ],
             temperature=0.2,

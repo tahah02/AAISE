@@ -119,25 +119,52 @@ async def test_handle_qa_explanation_intent_answers_without_triggering_build(db_
 
 @pytest.mark.asyncio
 async def test_cancel_workflow_run_endpoint(db_session):
+    from unittest.mock import MagicMock, patch
+    from src.api.routes.workflow import ACTIVE_WORKFLOW_TASKS
+
     run = db_session.query(WorkflowRunORM).first()
     assert run.status == "RUNNING"
 
-    resp = await cancel_workflow_run(run_id=run.id, db=db_session)
-    assert resp["status"] == "CANCELLED"
+    # Simulate an active registered task
+    dummy_task = MagicMock()
+    dummy_task.done.return_value = False
+    ACTIVE_WORKFLOW_TASKS[run.id] = dummy_task
+
+    with patch("src.infrastructure.execution.process_manager.ProjectProcessManager.get_instance") as mock_get_pm:
+        mock_pm = MagicMock()
+        mock_get_pm.return_value = mock_pm
+
+        resp = await cancel_workflow_run(run_id=run.id, db=db_session)
+        assert resp["status"] == "CANCELLED"
+
+        # Verify task was actively cancelled
+        dummy_task.cancel.assert_called_once()
+        mock_pm.stop_project.assert_any_call(run.project_id, "channel-app")
 
     db_session.refresh(run)
     assert run.status == "CANCELLED"
 
+    # Verify duplicate cancel does not crash or spam
+    resp_second = await cancel_workflow_run(run_id=run.id, db=db_session)
+    assert resp_second["status"] == "CANCELLED"
+
 
 @pytest.mark.asyncio
 async def test_cancel_workflow_for_project_endpoint(db_session):
+    from unittest.mock import MagicMock, patch
+
     project = db_session.query(ProjectORM).first()
     run = db_session.query(WorkflowRunORM).filter_by(project_id=project.id).first()
     run.status = "RUNNING"
     db_session.commit()
 
-    resp = await cancel_workflow_for_project(project_id=project.id, db=db_session)
-    assert resp["status"] == "CANCELLED"
+    with patch("src.infrastructure.execution.process_manager.ProjectProcessManager.get_instance") as mock_get_pm:
+        mock_pm = MagicMock()
+        mock_get_pm.return_value = mock_pm
+
+        resp = await cancel_workflow_for_project(project_id=project.id, db=db_session)
+        assert resp["status"] == "CANCELLED"
+        mock_pm.stop_project.assert_any_call(project.id, "channel-app")
 
     db_session.refresh(run)
     assert run.status == "CANCELLED"

@@ -1,9 +1,10 @@
 import uuid
+from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 
 from src.domain.enums import LLMProvider
 from src.infrastructure.config import Settings
-from src.infrastructure.db.models import LLMInvocationORM, TokenUsageORM
+from src.infrastructure.db.models import LLMInvocationORM, TokenUsageORM, AgentExecutionORM, utc_now
 from src.ports.llm_gateway import LLMResponse
 
 
@@ -122,7 +123,37 @@ class TokenTrackerService:
 
             provider_name = providers_used[0] if providers_used else "gemini"
             model_name = models_used[0] if models_used else "gemini-3.5-flash-lite"
-            latency_sec = round(total_latency_ms / 1000.0, 1)
+            llm_latency_sec = round(total_latency_ms / 1000.0, 1)
+
+            # Query real wall-clock task execution duration from AgentExecutionORM
+            exec_row = self.db.query(AgentExecutionORM).filter_by(id=exec_id).first()
+            task_duration_sec = None
+            task_duration_label = None
+            if exec_row and exec_row.started_at:
+                now = utc_now()
+                finish_dt = exec_row.finished_at
+                if not finish_dt:
+                    latest_inv_time = max((i.invoked_at for i in invocations if i.invoked_at), default=None)
+                    if latest_inv_time:
+                        finish_dt = latest_inv_time + timedelta(milliseconds=total_latency_ms)
+                    else:
+                        finish_dt = now
+
+                start_naive = exec_row.started_at.replace(tzinfo=None) if exec_row.started_at.tzinfo else exec_row.started_at
+                finish_naive = finish_dt.replace(tzinfo=None) if finish_dt.tzinfo else finish_dt
+                raw_elapsed = (finish_naive - start_naive).total_seconds()
+
+                if 0.1 <= raw_elapsed <= 3600:
+                    task_duration_sec = round(raw_elapsed, 1)
+                else:
+                    task_duration_sec = llm_latency_sec
+
+                if task_duration_sec >= 60:
+                    mins = int(task_duration_sec // 60)
+                    secs = int(task_duration_sec % 60)
+                    task_duration_label = f"{mins}m {secs}s"
+                else:
+                    task_duration_label = f"{task_duration_sec}s"
 
             # Determine free tier / local status
             is_local = "ollama" in provider_name.lower()
@@ -130,18 +161,30 @@ class TokenTrackerService:
 
             cost_label = "$0.00 (Local)" if is_local else ("$0.00 (Free Tier)" if is_free_tier else f"${total_cost:.4f}")
 
+            # Format dual badge: Task execution duration + LLM inference latency
+            effective_duration = task_duration_sec if task_duration_sec is not None else llm_latency_sec
+            effective_label = task_duration_label if task_duration_label else f"{llm_latency_sec}s"
+            if task_duration_sec and task_duration_sec > (llm_latency_sec + 3):
+                duration_display = f"{task_duration_label} (LLM: {llm_latency_sec}s)"
+            else:
+                duration_display = effective_label
+
             return {
                 "totalTokens": total_tokens,
                 "promptTokens": total_prompt,
                 "completionTokens": total_comp,
                 "latencyMs": total_latency_ms,
-                "latencySec": latency_sec,
+                "llmLatencySec": llm_latency_sec,
+                "taskDurationSec": effective_duration,
+                "taskDurationLabel": effective_label,
+                "latencySec": effective_duration,
+                "durationLabel": duration_display,
                 "estimatedCostUsd": round(total_cost, 6),
                 "costLabel": cost_label,
                 "provider": provider_name,
                 "model": model_name,
                 "isFreeTier": is_free_tier,
-                "displayBadge": f"⚡ {total_tokens:,} tokens • {latency_sec}s • {cost_label} • {model_name}",
+                "displayBadge": f"⚡ {total_tokens:,} tokens • ⏱️ {duration_display} • {cost_label} • {model_name}",
             }
         except Exception:
             return None
