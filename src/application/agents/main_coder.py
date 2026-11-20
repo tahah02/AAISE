@@ -69,8 +69,12 @@ Your responsibility:
 2. STRICT ARCHITECTURAL & SCOPE CONSTRAINTS:
    - Implement ONLY the entities, controllers, services, repositories, and external clients specified in the Technical Design Document.
    - NEVER create internal mock controllers (e.g. `MockVendorController.cs`) inside channel-app. All external vendor/mock APIs must be consumed via a typed `HttpClient` registered in `Program.cs` and configured with `MockVendor:BaseUrl` in `appsettings.json`.
-3. STRUCTURE & CLEAN ARCHITECTURE (MANDATORY MULTI-FILE CODE GENERATION):
-   You MUST generate a complete, working, enterprise-grade project with separate files for EVERY Clean Architecture layer as designed in `docs/TECHNICAL_DESIGN.md`. DO NOT omit any layer! DO NOT collapse logic into Program.cs!
+3. ARCHITECTURAL PATTERN & DIRECTORY STRUCTURE (TDD-DRIVEN):
+   - Read Section 1 ("System Architecture & Directory Structure") of `docs/TECHNICAL_DESIGN.md`.
+   - Strictly adhere to the specific architectural pattern prescribed in the TDD (e.g., N-Tier, Clean Architecture, Vertical Slice, MVC, or Modular Monolith).
+   - Implement ONLY the layers, directories, and files explicitly defined in Section 1 of the TDD.
+   - DO NOT force Clean Architecture if the TDD prescribes N-Tier or another pattern.
+   - NEVER collapse multi-layer architecture into a single file or Program.cs.
    
    - `channel-app.csproj`: SDK project targeting net8.0 with:
      * `<DefaultItemExcludes>$(DefaultItemExcludes);channel-app.Tests/**</DefaultItemExcludes>` inside `<PropertyGroup>` (MANDATORY: Prevents test files from being compiled inside Web API)
@@ -122,7 +126,7 @@ Your responsibility:
        - Duplicate records / conflict -> StatusCodes.Status409Conflict (409 Conflict).
        - Input validation / bad request -> StatusCodes.Status400BadRequest (400 Bad Request).
        (MANDATORY: NEVER invent non-existent status names like Status400BadGateway).
-     * Health Checks: `builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>();` mapped to `/health`.
+     * Health Checks: Always register `builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>();` before building the app. MANDATORY: If mapping health endpoints with `app.MapHealthChecks("/health")`, `builder.Services.AddHealthChecks()` MUST be explicitly registered in `builder.Services`, otherwise runtime throws `InvalidOperationException: Unable to find the required services`.
      * Swagger / OpenAPI documentation configured and enabled (`builder.Services.AddEndpointsApiExplorer(); builder.Services.AddSwaggerGen(c => { c.ResolveConflictingActions(apiDescriptions => apiDescriptions.First()); });`). If configuring JWT Bearer authorization, configure security requirement using OpenApiSecurityScheme:
        `c.AddSecurityRequirement(new OpenApiSecurityRequirement { { new OpenApiSecurityScheme { Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" } }, Array.Empty<string>() } });`
      * Middleware & Security:
@@ -147,7 +151,19 @@ Your responsibility:
      * REAL unit tests implementing the UT cases from the Test Specification (e.g. UT-01 Email Normalization, UT-02 Unicode length, UT-03 UTC DateTime Converter, domain entity logic). ZERO DUMMY PLACEHOLDERS!
      * TIMEPROVIDER RULE: If using `TimeProvider`, NEVER call non-existent methods like `TimeProvider.FromUtcNow(...)`. To freeze/mock time, use Moq: `var mockTime = new Mock<TimeProvider>(); mockTime.Setup(t => t.GetUtcNow()).Returns(new DateTimeOffset(fixedTime));` or pass `TimeProvider.System`.
    - `channel-app.Tests/IntegrationTests.cs`:
-     * MANDATORY USINGS: MUST explicitly include `using System;`, `using System.Threading.Tasks;`, `using System.Net;`, `using System.Net.Http;`, `using System.Text.Json;`, `using Xunit;`, `using FluentAssertions;`, and `using Microsoft.AspNetCore.Mvc.Testing;` at the very top.
+     * MANDATORY USINGS: MUST explicitly include:
+       `using System;`
+       `using System.Threading.Tasks;`
+       `using System.Net;`
+       `using System.Net.Http;`
+       `using System.Text.Json;`
+       `using Xunit;`
+       `using FluentAssertions;`
+       `using Microsoft.AspNetCore.Mvc.Testing;`
+       `using ChannelApp;`
+       `using ChannelApp.Models;`
+       `using ChannelApp.DTOs;`
+       at the very top of `IntegrationTests.cs`. NEVER omit `using ChannelApp;` or `using System.Threading.Tasks;` as this causes CS0246 errors on `Program` and `Task`.
      * Real integration tests using `WebApplicationFactory<Program>` sending authentic HTTP requests to the controller endpoints from Section 3 of the TDD verifying status codes (201, 200, 400, 404) and JSON response payloads.
      * FLUENTASSERTIONS RULE: For checking non-default DateTime, use `.Should().NotBe(default(DateTime))` (NEVER use non-existent methods like `.NotBeDefault()`). For checking status codes, use `.StatusCode.Should().Be(HttpStatusCode.OK)`.
 
@@ -507,7 +523,10 @@ class MainCodingAgent(BaseAgent):
                     content=(
                         f"The generated code failed compilation / verification. Errors:\n\n"
                         f"```\n{build_output}\n```\n\n"
-                        f"Please fix all compilation errors and return ONLY the corrected or modified files in the exact JSON format:\n"
+                        f"CRITICAL COMPILATION FIX RULES:\n"
+                        f"1. If CS1061 or CS0246 occurs in `channel-app.Tests` (e.g. `UnitTests.cs` or `IntegrationTests.cs`), check the actual return type of the controller action or service. Do NOT invoke properties like `.Kind` on untyped `object` or `IActionResult`. Use concrete DTO casting (e.g. `var res = (OkObjectResult)actionResult; var val = (MyDto)res.Value!;`) or assert directly using FluentAssertions `res.Should().BeOfType<OkObjectResult>()`.\n"
+                        f"2. If CS9202 occurs (ref/unsafe in async methods), do not pass ref structs or spans across await boundaries. Use standard primitive types or records.\n"
+                        f"3. Return ONLY the corrected or modified files in the exact JSON format:\n"
                         f'{{"files": {{"path/to/ModifiedFile.cs": "complete corrected file contents..."}}}}\n'
                         f"CRITICAL: Return ONLY the files that you modified to resolve the errors. Do NOT re-emit files that require no changes."
                     )

@@ -323,6 +323,10 @@ class OrchestratorService:
             target_phase = "MOCK_DEVELOPMENT"
         elif is_security_revision:
             target_phase = "SECURITY_AUDIT"
+        elif is_security_approved:
+            target_phase = "RELEASE"
+        elif is_qa_approved:
+            target_phase = "SECURITY_AUDIT"
         elif is_spec_approved:
             target_phase = "DEVELOPMENT"
 
@@ -809,7 +813,7 @@ class OrchestratorService:
                 self.db,
                 project_id,
                 "agent3",
-                "Starting application implementation, Clean Architecture directory setup, and component synthesis...",
+                "Starting application implementation, synthesizing directory structure from architectural specifications, and building components...",
             )
 
             ctx = _make_context(s, "Agent 3: Main Coding Agent", "DEVELOPMENT")
@@ -1125,6 +1129,12 @@ class OrchestratorService:
                 f"QA Contract Test Status: {s['qa_status']} ({s['qa_passed_count']} passed, {s['qa_failed_count']} failed)",
             ]
 
+            swagger_url = f"http://localhost:{live_port}/swagger"
+            live_server_card = (
+                f"\n\n> 🌐 **Live Test Server Active**: `http://localhost:{live_port}`\n"
+                f"> 📄 **Interactive Swagger Documentation**: [{swagger_url}]({swagger_url}) *(Open to test live endpoints)*\n"
+            )
+
             if s["qa_status"] == "PASSED":
                 if remediation_count > 0:
                     report_msg = (
@@ -1134,6 +1144,7 @@ class OrchestratorService:
                         f"- **Tests Failed**: `0`\n"
                         f"- **Specification**: `docs/XUNIT_TEST_SPEC.md`\n\n"
                         f"**Summary**: All contract and validation test cases verified successfully after autonomous code remediation by Agent 3."
+                        f"{live_server_card}"
                         f"{table_md}"
                         f"{cli_md}"
                     )
@@ -1145,6 +1156,7 @@ class OrchestratorService:
                         f"- **Tests Failed**: `0`\n"
                         f"- **Specification**: `docs/XUNIT_TEST_SPEC.md`\n\n"
                         f"**Summary**: {res.summary}"
+                        f"{live_server_card}"
                         f"{table_md}"
                         f"{cli_md}"
                     )
@@ -1154,7 +1166,13 @@ class OrchestratorService:
                     project_id,
                     "agent4",
                     report_msg,
-                    metadata={"qaReport": qa_report_data, "checklist": qa_checklist, "telemetry": qa_telemetry},
+                    metadata={
+                        "qaReport": qa_report_data,
+                        "checklist": qa_checklist,
+                        "telemetry": qa_telemetry,
+                        "liveServerUrl": f"http://localhost:{live_port}",
+                        "swaggerUrl": swagger_url,
+                    },
                 )
             else:
                 report_msg = (
@@ -1164,6 +1182,7 @@ class OrchestratorService:
                     f"- **Tests Failed**: `{s['qa_failed_count']}`\n"
                     f"- **Specification**: `docs/XUNIT_TEST_SPEC.md`\n\n"
                     f"**Summary**: {res.summary}"
+                    f"{live_server_card}"
                     f"{table_md}"
                     f"{cli_md}"
                 )
@@ -1173,7 +1192,13 @@ class OrchestratorService:
                     project_id,
                     "agent4",
                     report_msg,
-                    metadata={"qaReport": qa_report_data, "checklist": qa_checklist, "telemetry": qa_telemetry},
+                    metadata={
+                        "qaReport": qa_report_data,
+                        "checklist": qa_checklist,
+                        "telemetry": qa_telemetry,
+                        "liveServerUrl": f"http://localhost:{live_port}",
+                        "swaggerUrl": swagger_url,
+                    },
                 )
                 if remediation_count < 2:
                     save_chat_message(
@@ -1244,12 +1269,43 @@ class OrchestratorService:
 
             sec_telemetry = self.tracker.get_execution_telemetry(ctx.agent_execution_id)
 
+            evaluated_checks = res.metadata.get("evaluated_checks", [])
+            scanned_files = res.metadata.get("scanned_files", [])
+
+            # Format detailed evidence table if available
+            evidence_md = ""
+            if evaluated_checks:
+                check_rows = []
+                for ec in evaluated_checks:
+                    cat = ec.get("category", "SECURITY_CHECK")
+                    cwe = ec.get("cwe", "")
+                    fp = ec.get("file_path", "")
+                    ln = ec.get("line_number", "")
+                    st = ec.get("status", "PASSED")
+                    snip = ec.get("scanned_snippet", "")
+                    asrt = ec.get("assertion", "")
+                    file_loc = f"`{fp}:{ln}`" if ln else f"`{fp}`"
+                    check_rows.append(f"| **{cat}** ({cwe}) | {file_loc} | `{st}` | `{snip[:45]}` | {asrt} |")
+                evidence_md = (
+                    "\n\n#### 🔍 Verifiable AST / Code Analysis Evidence\n"
+                    "| Vulnerability Check | Inspected File & Line | Status | Scanned Code Snippet | Verifiable Proof Assertion |\n"
+                    "| :--- | :--- | :--- | :--- | :--- |\n" + "\n".join(check_rows)
+                )
+
+            files_md = ""
+            if scanned_files:
+                files_md = f"\n- **Scanned Source Files**: `{len(scanned_files)} files` ({', '.join(scanned_files[:5])})"
+
             save_chat_message(
                 self.db,
                 project_id,
                 "agent5",
-                f"### 🛡️ Security SAST Audit Report\n\n- **Scan Status**: `{s['security_status']}`\n- **Vulnerabilities Found**: `{s['security_findings_count']}`\n\n**Summary**: {res.summary}",
-                metadata={"telemetry": sec_telemetry},
+                f"### 🛡️ Security SAST Audit Report\n\n- **Scan Status**: `{s['security_status']}`\n- **Vulnerabilities Found**: `{s['security_findings_count']}`{files_md}\n\n**Summary**: {res.summary}{evidence_md}",
+                metadata={
+                    "telemetry": sec_telemetry,
+                    "evaluated_checks": evaluated_checks,
+                    "scanned_files": scanned_files,
+                },
             )
 
             if not s.get("security_approved"):

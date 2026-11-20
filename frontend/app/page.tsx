@@ -317,6 +317,7 @@ export default function WorkspacePage() {
   const [feedbackInput, setFeedbackInput] = useState("");
 
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [activeFeedbackApprovalId, setActiveFeedbackApprovalId] = useState<string | null>(null);
 
   const [showConfigModal, setShowConfigModal] = useState(false);
 
@@ -406,6 +407,7 @@ export default function WorkspacePage() {
     return () => clearInterval(interval);
   }, [selectedProject?.id]);
 
+  const msgsCount = messages.length;
   useEffect(() => {
     if (!selectedProject?.id) return;
     fetchAnalyticsOverview(selectedProject.id).then((ov) => {
@@ -414,7 +416,7 @@ export default function WorkspacePage() {
     fetchAnalyticsQAReports(selectedProject.id).then((qa) => {
       if (qa?.test_runs) setLiveQaRuns(qa.test_runs);
     });
-  }, [selectedProject?.id, activeTab, messages.length]);
+  }, [selectedProject?.id, activeTab, msgsCount]);
 
   const handleRunProject = async () => {
     if (!selectedProject?.id || isStartingRun) return;
@@ -518,12 +520,13 @@ export default function WorkspacePage() {
 
     let isMounted = true;
 
-    // Reset local project state immediately to prevent stale project leakage
+    // Reset local project state immediately to prevent stale project leakage,
+    // but preserve optimistic pending message if user just submitted a new requirement
     if (activeEventSourceRef.current) {
       activeEventSourceRef.current.close();
       activeEventSourceRef.current = null;
     }
-    setMessages([]);
+    setMessages((prev) => (isSubmitting && prev.length > 0 ? prev : []));
     setArtifacts([]);
     setCodeDiff("");
     setCurrentRunId(null);
@@ -564,7 +567,7 @@ export default function WorkspacePage() {
         if (data && data.messages && data.messages.length > 0) {
           setMessages(data.messages);
         } else {
-          setMessages([]);
+          setMessages((prev) => (isSubmitting && prev.length > 0 ? prev : []));
         }
         if (data && data.run_id) {
           setCurrentRunId(data.run_id);
@@ -822,9 +825,9 @@ export default function WorkspacePage() {
       // If genuine requirement was submitted:
 
       if (resp.workflow_run_id) {
-
         setCurrentRunId(resp.workflow_run_id);
-
+        setIsWorkflowRunning(true);
+        setStreamStatus("running");
       }
 
 
@@ -2010,9 +2013,9 @@ export default function WorkspacePage() {
 
               ) : (
 
-                messages.map((m) => (
+                messages.map((m, i) => (
 
-                  <div key={m.id} className="flex items-start gap-3">
+                  <div key={m.id || `msg-${i}`} className="flex items-start gap-3">
 
                     {m.sender === "user" ? (
 
@@ -2396,65 +2399,71 @@ export default function WorkspacePage() {
 
 
                               <button
-
                                 onClick={() => {
-
-                                  if (m.approvalId) setActiveApprovalId(m.approvalId);
-
+                                  if (m.approvalId) {
+                                    setActiveApprovalId(m.approvalId);
+                                    setActiveFeedbackApprovalId(m.approvalId);
+                                  } else {
+                                    setActiveFeedbackApprovalId(`card-${i}`);
+                                  }
                                   setShowFeedbackModal(true);
-
                                 }}
-
                                 className="px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 font-medium text-[12px] flex items-center gap-1.5 transition"
-
                               >
-
                                 <RotateCcw className="h-3.5 w-3.5 text-amber-400" /> Request Changes
-
                               </button>
-
                             </div>
-
                           )}
 
-
-
-                          {showFeedbackModal && (
-
+                          {showFeedbackModal && (activeFeedbackApprovalId === m.approvalId || activeFeedbackApprovalId === `card-${i}`) && (
                             <div className="mt-3 ml-8 p-3 rounded-lg bg-[#0e121e] border border-amber-600/40 space-y-2">
-
-                              <span className="text-[11px] font-semibold text-amber-300">Specify required changes for Agent 1:</span>
-
-                              <input
-                                type="text"
-                                value={feedbackInput}
-                                onChange={(e) => setFeedbackInput(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    handleRequestChanges();
-                                  }
-                                }}
-                                placeholder="e.g., Add Redis caching to token validation and rate limiting..."
-                                className="w-full bg-[#080b12] border border-slate-700 rounded px-2.5 py-1.5 text-[12px] text-slate-200 focus:outline-none focus:border-amber-500"
-                              />
+                              {(() => {
+                                const gate = (m.gateType || "").toUpperCase();
+                                let agentTitle = "Agent 1 (Documentation Reviewer)";
+                                let placeholderText = "e.g., Update database schema or change API contract specifications...";
+                                if (gate.includes("DEV") || gate.includes("CODE")) {
+                                  agentTitle = "Agent 3 (Main Coding Agent)";
+                                  placeholderText = "e.g., Fix compiler errors, correct service methods, or adjust architecture...";
+                                } else if (gate.includes("QA")) {
+                                  agentTitle = "Agent 4 (QA Engineer)";
+                                  placeholderText = "e.g., Re-test specific route or revise contract assertion criteria...";
+                                } else if (gate.includes("SEC")) {
+                                  agentTitle = "Agent 5 (Security Reviewer)";
+                                  placeholderText = "e.g., Provide remediation advice for identified vulnerability...";
+                                }
+                                return (
+                                  <>
+                                    <span className="text-[11px] font-semibold text-amber-300">
+                                      Specify required changes for {agentTitle}:
+                                    </span>
+                                    <input
+                                      type="text"
+                                      value={feedbackInput}
+                                      onChange={(e) => setFeedbackInput(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") {
+                                          e.preventDefault();
+                                          handleRequestChanges();
+                                        }
+                                      }}
+                                      placeholder={placeholderText}
+                                      className="w-full bg-[#080b12] border border-slate-700 rounded px-2.5 py-1.5 text-[12px] text-slate-200 focus:outline-none focus:border-amber-500"
+                                    />
+                                  </>
+                                );
+                              })()}
 
                               <div className="flex items-center gap-2 justify-end">
-
                                 <button
-
-                                  onClick={() => setShowFeedbackModal(false)}
-
+                                  onClick={() => {
+                                    setShowFeedbackModal(false);
+                                    setActiveFeedbackApprovalId(null);
+                                  }}
                                   className="px-2.5 py-1 text-[11px] text-slate-400 hover:text-slate-200"
-
                                 >
-
                                   Cancel
-
                                 </button>
-
                                 <button
-
                                   onClick={handleRequestChanges}
 
                                   className="px-3 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded text-[11px] font-medium"
@@ -3333,30 +3342,76 @@ export default function WorkspacePage() {
                   const secBadgeText = isSecSkipped ? "SKIPPED" : hasVulns ? "VULNERABILITIES DETECTED" : "VERIFIED CLEAN";
                   const secBorderClass = hasVulns ? "border-rose-500/40" : "border-amber-500/40";
 
+                  // Extract security checks if markdown table exists
+                  const secLines = secText.split("\n");
+                  const secEvidenceRows = secLines
+                    .filter((l) => l.trim().startsWith("| **"))
+                    .map((l) => {
+                      const cols = l.split("|").map((c) => c.trim()).filter(Boolean);
+                      return {
+                        check: cols[0]?.replace(/\*\*/g, "") || "",
+                        file: cols[1]?.replace(/`/g, "") || "",
+                        status: cols[2]?.replace(/`/g, "") || "",
+                        snippet: cols[3]?.replace(/`/g, "") || "",
+                        assertion: cols[4] || "",
+                      };
+                    });
+
                   return (
-
-                    <div className={`p-3 rounded-xl bg-[#101422] border ${secBorderClass} space-y-2 text-[12px]`}>
-
+                    <div className={`p-3 rounded-xl bg-[#101422] border ${secBorderClass} space-y-3 text-[12px]`}>
                       <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-
                         <span className="font-semibold text-amber-400 flex items-center gap-1.5">
-
-                          <ShieldCheck className="h-4 w-4" /> Agent 5: Security SAST Report
-
+                          <ShieldCheck className="h-4 w-4" /> Agent 5: Security SAST Audit Report
                         </span>
-
                         <span className={`text-[10px] border px-2 py-0.5 rounded-full ${secBadgeClass}`}>{secBadgeText}</span>
-
                       </div>
 
-                      <pre className="font-sans text-slate-200 whitespace-pre-wrap leading-relaxed text-[12px]">
+                      {secEvidenceRows.length > 0 && (
+                        <div className="border border-slate-800 rounded-lg overflow-hidden">
+                          <div className="text-[10.5px] font-semibold text-slate-300 bg-slate-900/90 px-2.5 py-1.5 border-b border-slate-800 flex items-center justify-between">
+                            <span>🔍 Verifiable AST / Code Audit Evidence</span>
+                            <span className="text-amber-400 font-mono text-[10px]">{secEvidenceRows.length} Checkpoints Inspected</span>
+                          </div>
+                          <div className="max-h-72 overflow-y-auto divide-y divide-slate-800/60 text-[11px]">
+                            {secEvidenceRows.map((r, i) => (
+                              <div key={i} className="p-2.5 hover:bg-slate-850/40 flex flex-col gap-1.5 transition">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-semibold text-amber-300 font-mono text-[11px]">{r.check}</span>
+                                    <span className="font-mono text-cyan-400 text-[10.5px] bg-cyan-950/50 px-1.5 py-0.5 rounded border border-cyan-500/20">{r.file}</span>
+                                  </div>
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                                      r.status === "PASSED"
+                                        ? "bg-emerald-950 text-emerald-400 border border-emerald-500/30"
+                                        : "bg-rose-950 text-rose-400 border border-rose-500/30"
+                                    }`}
+                                  >
+                                    {r.status}
+                                  </span>
+                                </div>
+                                {r.snippet && (
+                                  <div className="bg-[#080b12] p-1.5 rounded border border-slate-800/80 font-mono text-[10px] text-slate-300 overflow-x-auto">
+                                    <span className="text-slate-500 select-none mr-1.5">scanned:</span>
+                                    <code>{r.snippet}</code>
+                                  </div>
+                                )}
+                                {r.assertion && (
+                                  <div className="text-slate-400 text-[10.5px] leading-snug">
+                                    <span className="text-slate-500 mr-1 font-mono">assertion:</span>
+                                    {r.assertion}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
-                        {latestSec.text}
-
+                      <pre className="font-sans text-slate-200 whitespace-pre-wrap leading-relaxed text-[11.5px] bg-black/30 p-2.5 rounded-lg border border-slate-800/80">
+                        {secText}
                       </pre>
-
                     </div>
-
                   );
 
                 })()

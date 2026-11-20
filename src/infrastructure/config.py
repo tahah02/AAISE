@@ -1,3 +1,7 @@
+import os
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+os.environ["LITELLM_MODE"] = "DEV"
+os.environ["LITELLM_TELEMETRY"] = "False"
 import json
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -43,6 +47,11 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str | None = None
     GROQ_API_KEY: str | None = None
     OPENROUTER_API_KEY: str | None = None
+    ANTHROPIC_API_KEY: str | None = None
+    OPENAI_API_KEY: str | None = None
+    DEEPSEEK_API_KEY: str | None = None
+    CUSTOM_LLM_API_KEY: str | None = None
+    CUSTOM_LLM_API_BASE: str | None = None
     OLLAMA_BASE_URL: str = "http://localhost:11434"
 
     LLM_CONFIG_PATH: str = "config/llm_config.json"

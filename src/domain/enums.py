@@ -18,6 +18,10 @@ class LLMProvider(str, Enum):
     GROQ = "groq"
     OPENROUTER = "openrouter"
     OLLAMA = "ollama"
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
+    DEEPSEEK = "deepseek"
+    CUSTOM = "custom"
 
 
 class AgentType(str, Enum):

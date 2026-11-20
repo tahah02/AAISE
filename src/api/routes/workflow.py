@@ -742,6 +742,18 @@ def is_qa_explanation_query(user_text: str) -> bool:
         return False
 
     # Explicit build commands should never be treated as Q&A
+    # Action/Correction overrides: If user asks to correct, fix, modify, remove, update or change code,
+    # it must NEVER be treated as a passive Q&A explanation, even if ending with a question mark.
+    action_keywords = (
+        "correct that", "correct this", "fix that", "fix this", "fix it", "correct it",
+        "remove endpoint", "remove the endpoint", "change route", "change the route",
+        "update route", "update the route", "update code", "change code", "fix the issue",
+        "remove get", "delete endpoint", "fix error", "fix the error", "correct the route",
+        "can you correct", "can you fix", "please fix", "please correct", "make it work",
+    )
+    if any(k in t for k in action_keywords):
+        return False
+
     imperative_build_starts = (
         "build", "implement", "develop", "code ", "create app", "generate tdd", 
         "start build", "proceed with build", "run workflow", "please implement"
@@ -806,6 +818,18 @@ def is_explicit_build_command(user_text: str) -> bool:
         "code this",
         "run pipeline",
         "start workflow",
+        "correct that",
+        "correct this",
+        "fix that",
+        "fix this",
+        "fix it",
+        "correct it",
+        "remove endpoint",
+        "change route",
+        "update route",
+        "update code",
+        "can you correct",
+        "can you fix",
     )
     return any(k in t for k in build_keywords)
 

@@ -6,6 +6,8 @@ from typing import Any
 
 import os
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+os.environ["LITELLM_MODE"] = "DEV"
+os.environ["LITELLM_TELEMETRY"] = "False"
 import litellm
 litellm.telemetry = False
 litellm.suppress_debug_info = True
@@ -37,6 +39,10 @@ class LiteLLMAdapter(ILLMGateway):
         LLMProvider.GEMINI,
         LLMProvider.GROQ,
         LLMProvider.OPENROUTER,
+        LLMProvider.ANTHROPIC,
+        LLMProvider.OPENAI,
+        LLMProvider.DEEPSEEK,
+        LLMProvider.CUSTOM,
     }
 
     def _get_api_key(self, provider: LLMProvider) -> str | None:
@@ -46,7 +52,15 @@ class LiteLLMAdapter(ILLMGateway):
             return settings.GROQ_API_KEY
         if provider == LLMProvider.OPENROUTER:
             return settings.OPENROUTER_API_KEY
-        return None
+        if provider == LLMProvider.ANTHROPIC:
+            return settings.ANTHROPIC_API_KEY
+        if provider == LLMProvider.OPENAI:
+            return settings.OPENAI_API_KEY
+        if provider == LLMProvider.DEEPSEEK:
+            return settings.DEEPSEEK_API_KEY
+        if provider == LLMProvider.CUSTOM:
+            return settings.CUSTOM_LLM_API_KEY or "dummy-key"
+        return getattr(settings, f"{provider.value.upper()}_API_KEY", None)
 
     def get_default_model(self, provider: LLMProvider) -> str:
         provider_cfg = settings.llm_config.providers.get(provider)
@@ -55,16 +69,27 @@ class LiteLLMAdapter(ILLMGateway):
         raise ValueError(f"No configuration found for provider '{provider.value}'")
 
     def _format_model_identifier(self, provider: LLMProvider, model: str) -> str:
-        # LiteLLM routes Gemini via "gemini/<model>", Groq via "groq/<model>", OpenRouter via "openrouter/<model>"
         clean_model = model.strip()
         prefix = f"{provider.value}/"
         if clean_model.startswith(prefix):
-            clean_model = clean_model[len(prefix):]
+            return clean_model
+        if provider == LLMProvider.ANTHROPIC:
+            return clean_model if clean_model.startswith("anthropic/") else f"anthropic/{clean_model}"
+        if provider in (LLMProvider.OPENAI, LLMProvider.CUSTOM):
+            return clean_model if clean_model.startswith("openai/") else f"openai/{clean_model}"
         return f"{prefix}{clean_model}"
 
     def _redact_secrets(self, text: str) -> str:
         redacted = text
-        for key in (settings.GEMINI_API_KEY, settings.GROQ_API_KEY, settings.OPENROUTER_API_KEY):
+        for key in (
+            settings.GEMINI_API_KEY,
+            settings.GROQ_API_KEY,
+            settings.OPENROUTER_API_KEY,
+            settings.ANTHROPIC_API_KEY,
+            settings.OPENAI_API_KEY,
+            settings.DEEPSEEK_API_KEY,
+            settings.CUSTOM_LLM_API_KEY,
+        ):
             if key and len(key) > 4:
                 redacted = redacted.replace(key, "[REDACTED]")
         return redacted
@@ -122,6 +147,9 @@ class LiteLLMAdapter(ILLMGateway):
             "temperature": request.temperature,
             "timeout": request.timeout_seconds,
         }
+
+        if settings.CUSTOM_LLM_API_BASE:
+            kwargs["api_base"] = settings.CUSTOM_LLM_API_BASE
 
         if request.max_tokens is not None:
             kwargs["max_tokens"] = request.max_tokens

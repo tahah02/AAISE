@@ -278,20 +278,39 @@ class QAEngineerAgent(BaseAgent):
                         headers["Content-Type"] = "application/json"
 
                     full_url = f"{base_url}{ep}"
+
+                    # Dynamically randomize unique fields (email, username, etc.) to prevent false-negative 409 conflict loops
+                    def _randomize_payload(obj):
+                        if isinstance(obj, dict):
+                            new_obj = {}
+                            for k, v in obj.items():
+                                if isinstance(v, str) and "@" in v and not v.startswith("conflict_"):
+                                    parts = v.split("@")
+                                    rand_suffix = uuid.uuid4().hex[:6]
+                                    new_obj[k] = f"{parts[0]}_{rand_suffix}@{parts[1]}"
+                                else:
+                                    new_obj[k] = _randomize_payload(v)
+                            return new_obj
+                        elif isinstance(obj, list):
+                            return [_randomize_payload(i) for i in obj]
+                        return obj
+
+                    effective_payload = _randomize_payload(payload) if payload else payload
+
                     curl_cmd = f"curl -X {method} \"{full_url}\""
                     for hk, hv in headers.items():
                         curl_cmd += f" -H \"{hk}: {hv}\""
-                    if payload and method in ("POST", "PUT", "PATCH"):
-                        curl_cmd += f" -d '{json.dumps(payload)}'"
+                    if effective_payload and method in ("POST", "PUT", "PATCH"):
+                        curl_cmd += f" -d '{json.dumps(effective_payload)}'"
 
                     t0 = time.perf_counter()
                     try:
                         req_kw = {"headers": headers}
-                        if payload is not None:
+                        if effective_payload is not None:
                             if method in ("POST", "PUT", "PATCH"):
-                                req_kw["json"] = payload
-                            elif method == "GET" and isinstance(payload, dict):
-                                req_kw["params"] = payload
+                                req_kw["json"] = effective_payload
+                            elif method == "GET" and isinstance(effective_payload, dict):
+                                req_kw["params"] = effective_payload
 
                         resp = await client.request(method, full_url, **req_kw)
                         latency_ms = max(1, int((time.perf_counter() - t0) * 1000))
@@ -322,7 +341,7 @@ class QAEngineerAgent(BaseAgent):
                         "duration": f"{latency_ms}ms",
                         "duration_ms": latency_ms,
                         "details": details,
-                        "request_payload": payload,
+                        "request_payload": effective_payload,
                         "response_body": resp_snippet,
                         "curl_command": curl_cmd,
                     })
@@ -335,12 +354,10 @@ class QAEngineerAgent(BaseAgent):
             return False, test_cases, f"Live HTTP execution failed: {e}"
 
         finally:
+            # Keep server running if live tests ran so user can click Swagger/API links
+            # We do NOT kill immediately on shutdown, allowing user inspection
             if server_launched:
-                try:
-                    pm.stop_project(project_id, "channel-app")
-                    logger.info(f"Clean shutdown completed for project {project_id} channel-app.")
-                except Exception as e:
-                    logger.warning(f"Error stopping live channel-app: {e}")
+                logger.info(f"Test server remains active on base URL: {base_url} for user and Swagger inspection.")
 
     async def execute(self, context: AgentContext, input_text: str) -> AgentResult:
         # Load XUnit test specifications document

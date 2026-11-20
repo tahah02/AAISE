@@ -106,13 +106,13 @@ class ProjectProcessManager:
         cwd = proj_dir / "channel-app"
         if any(k in framework_lower for k in ("cs", "csharp", "dotnet", "net")):
             port = find_available_port(5001)
-            csprojs = list(cwd.glob("*.csproj"))
-            if csprojs:
-                target = str(csprojs[0])
-            elif (cwd / "channel-app.sln").exists():
-                target = str(cwd / "channel-app.sln")
+            # Find the primary executable web project (exclude test projects and avoid sln target)
+            web_csproj = cwd / "channel-app.csproj"
+            if web_csproj.exists():
+                target = str(web_csproj)
             else:
-                target = "."
+                csprojs = [p for p in cwd.glob("*.csproj") if not p.name.lower().endswith("test.csproj") and not p.name.lower().endswith("tests.csproj")]
+                target = str(csprojs[0]) if csprojs else "."
             cmd = ["dotnet", "run", "--project", target, "--urls", f"http://localhost:{port}"]
             url = f"http://localhost:{port}/swagger"
             return cmd, cwd, port, url

@@ -168,6 +168,7 @@ YOUR HIGHEST PRIORITY DIRECTIVES:
                 f"   - 7. Git Workflow & Branching Strategy\n"
                 f"   - 8. Requirement Traceability Matrix (Mapping every FR-xx and NFR-xx from the SRS)\n\n"
                 f"3. NORMATIVE ENTERPRISE IMPLEMENTATION SPECIFICATIONS:\n"
+                f"   - ARCHITECTURAL SPECIFICATION RULE: DO NOT write raw executable C# classes, methods, interceptor implementations, or code snippets inside docs/TECHNICAL_DESIGN.md. Specify architectural patterns, schemas, tables, and rules purely through prose, Markdown tables, and interface definitions. Actual code implementation belongs strictly to Agent 3.\n"
                 f"   - SQLite PRAGMA & Interceptor: Mandate 'SqlitePragmaInterceptor' (DbConnectionInterceptor) in EF Core configuration to strictly enforce PRAGMA foreign_keys = ON; and PRAGMA journal_mode = WAL; on every connection.\n"
                 f"   - Reverse Proxy & Headers: Mandate app.UseForwardedHeaders() at the very top of Program.cs middleware pipeline.\n"
                 f"   - Strict JSON & Duplicate Key Check: Mandate Utf8JsonReader duplicate-property validation or strict System.Text.Json options (JsonUnmappedMemberHandling.Disallow, JsonNumberHandling.Strict) to reject duplicate JSON keys with HTTP 400 Bad Request.\n"

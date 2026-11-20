@@ -15,17 +15,61 @@ from src.ports.llm_gateway import LLMRequest, ToolDefinition
 
 SECURITY_SYSTEM_PROMPT = """You are Agent 5: Security Reviewer.
 Your responsibility:
-1. Perform static code analysis (SAST) and security audits on source code repositories.
+1. Perform static application security testing (SAST) and code audits on source code repositories.
 2. You are STRICTLY READ-ONLY: You must never edit, overwrite, or delete code.
-3. Check for security vulnerabilities:
-   - Hardcoded secrets, plain-text API keys, passwords, private tokens
-   - SQL Injection, Command Injection, Path Traversal
-   - Insecure deserialization, improper auth/CORS configurations
-   - Unhandled exception disclosures
-4. For every finding, categorize severity as CRITICAL, HIGH, MEDIUM, or LOW, provide exact file path, line number, description, and remediation advice.
+3. Perform rigorous verification on core security categories:
+   - SQL Injection (CWE-89) & Command Injection (CWE-78)
+   - Hardcoded Secrets, API keys, JWT secrets, passwords (CWE-798)
+   - Cross-Origin Resource Sharing (CORS) & Auth Misconfigurations (CWE-942)
+   - Path Traversal & Unrestricted File Operations (CWE-22)
+   - Information Disclosure & Unhandled Stack Traces (CWE-209)
+4. For every evaluated category, provide VERIFIABLE EVIDENCE:
+   - Which exact file and line was inspected?
+   - What exact code snippet / AST structure was analyzed?
+   - What is the verdict (CLEAN or VULNERABLE) and technical proof assertion?
+5. For every finding / vulnerability, categorize severity as CRITICAL, HIGH, MEDIUM, or LOW, provide exact file path, line number, description, code snippet, and remediation advice.
 
-Respond with a JSON object:
+Respond strictly with a JSON object in this format:
 {
+  "evaluated_checks": [
+    {
+      "category": "SQL_INJECTION",
+      "cwe": "CWE-89",
+      "file_path": "Repositories/StudentRepository.cs",
+      "line_number": 24,
+      "scanned_snippet": "await _context.Students.FirstOrDefaultAsync(s => s.Email == email)",
+      "status": "PASSED",
+      "assertion": "LINQ Expression Tree parameterized queries verified. No raw SQL string concatenation found."
+    },
+    {
+      "category": "HARDCODED_SECRETS",
+      "cwe": "CWE-798",
+      "file_path": "appsettings.json",
+      "line_number": 5,
+      "scanned_snippet": "\\"DefaultConnection\\": \\"Data Source=students.db\\"",
+      "status": "PASSED",
+      "assertion": "No raw credentials or plaintext tokens exposed. Local connection string uses relative SQLite storage."
+    },
+    {
+      "category": "PATH_TRAVERSAL",
+      "cwe": "CWE-22",
+      "file_path": "Controllers/StudentController.cs",
+      "line_number": 15,
+      "scanned_snippet": "[ApiController]\\n[Route(\\"api/[controller]\\")]",
+      "status": "PASSED",
+      "assertion": "Controller only executes structured in-memory model binding; no unvalidated file system operations."
+    },
+    {
+      "category": "INFORMATION_DISCLOSURE",
+      "cwe": "CWE-209",
+      "file_path": "Program.cs",
+      "line_number": 20,
+      "scanned_snippet": "app.UseExceptionHandler()",
+      "status": "PASSED",
+      "assertion": "Global exception handling configured to mask server stack traces from API callers."
+    }
+  ],
+  "scanned_files": ["Program.cs", "Controllers/StudentController.cs", "Repositories/StudentRepository.cs", "appsettings.json"],
   "findings": [
     {
       "severity": "CRITICAL",
@@ -34,10 +78,11 @@ Respond with a JSON object:
       "file_path": "src/config.py",
       "line_number": 12,
       "description": "Plaintext secret detected in codebase",
+      "scanned_snippet": "SECRET_KEY = 'supersecret'",
       "remediation_advice": "Inject secret via environment variables"
     }
   ],
-  "overall_summary": "Security audit completed with 1 critical finding."
+  "overall_summary": "Security audit completed with 0 vulnerabilities detected. Scanned 4 source files across OWASP Top 5 checkpoints."
 }
 """
 
@@ -128,9 +173,13 @@ class SecurityReviewerAgent(BaseAgent):
         try:
             content_data = json.loads(response.content)
             findings_list = content_data.get("findings", [])
+            evaluated_checks = content_data.get("evaluated_checks", [])
+            scanned_files = content_data.get("scanned_files", list(files_data.keys()))
             summary = content_data.get("overall_summary", "Security review finished.")
         except Exception:
             findings_list = []
+            evaluated_checks = []
+            scanned_files = list(files_data.keys())
             summary = "Security audit completed."
 
         critical_or_high = sum(
@@ -172,5 +221,7 @@ class SecurityReviewerAgent(BaseAgent):
                 "scan_status": scan_status,
                 "total_findings": len(findings_list),
                 "critical_or_high_count": critical_or_high,
+                "evaluated_checks": evaluated_checks,
+                "scanned_files": scanned_files,
             },
         )

@@ -44,9 +44,16 @@ class LLMProviderResolver:
     ) -> None:
         self._adapters: dict[LLMProvider, ILLMGateway] = {}
         if litellm_adapter:
-            self._adapters[LLMProvider.GEMINI] = litellm_adapter
-            self._adapters[LLMProvider.GROQ] = litellm_adapter
-            self._adapters[LLMProvider.OPENROUTER] = litellm_adapter
+            for p in (
+                LLMProvider.GEMINI,
+                LLMProvider.GROQ,
+                LLMProvider.OPENROUTER,
+                LLMProvider.ANTHROPIC,
+                LLMProvider.OPENAI,
+                LLMProvider.DEEPSEEK,
+                LLMProvider.CUSTOM,
+            ):
+                self._adapters[p] = litellm_adapter
         if ollama_adapter:
             self._adapters[LLMProvider.OLLAMA] = ollama_adapter
 
@@ -54,13 +61,8 @@ class LLMProviderResolver:
         if provider not in self._adapters:
             if provider == LLMProvider.OLLAMA:
                 self._adapters[provider] = OllamaAdapter()
-            elif provider in (LLMProvider.GEMINI, LLMProvider.GROQ, LLMProvider.OPENROUTER):
-                self._adapters[provider] = LiteLLMAdapter()
             else:
-                raise ConfigurationError(
-                    f"Unsupported LLM provider '{provider.value}'. "
-                    f"Supported providers are: {[p.value for p in LLMProvider]}"
-                )
+                self._adapters[provider] = LiteLLMAdapter()
         return self._adapters[provider]
 
     def _parse_provider(self, provider_str: str) -> LLMProvider:

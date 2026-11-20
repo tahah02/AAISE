@@ -34,13 +34,18 @@ def _is_agent_enabled(state: WorkflowState, agent_num: int) -> bool:
 def route_entry(state: WorkflowState) -> str:
     if state.get("is_cancelled"):
         return END
-    if _is_agent_enabled(state, 1):
+    # If security is already approved or project is at release stage, go straight to release
+    if state.get("security_approved") or state.get("current_phase") == "RELEASE":
+        return "release_approval_gate"
+    if state.get("qa_approved") and not state.get("security_approved"):
+        return "check_security"
+    if _is_agent_enabled(state, 1) and not state.get("spec_approved"):
         return "doc_reviewer"
-    if _is_agent_enabled(state, 2) and state.get("requires_mock_vendor", True):
+    if _is_agent_enabled(state, 2) and state.get("requires_mock_vendor", True) and not state.get("mock_approved"):
         return "mock_developer"
-    if _is_agent_enabled(state, 3):
+    if _is_agent_enabled(state, 3) and not state.get("code_approved"):
         return "main_coder"
-    if _is_agent_enabled(state, 4):
+    if _is_agent_enabled(state, 4) and not state.get("qa_approved"):
         return "qa_engineer"
     return "check_security"
 

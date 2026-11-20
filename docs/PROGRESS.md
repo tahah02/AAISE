@@ -17,6 +17,83 @@ Progress is tracked strictly through verifiable architectural milestones, not ar
 
 ---
 
+### [2026-11-20] Step 53: Process Manager Project Execution Target, Startup Crash Prevention & Pure Specs (Completed)
+- **Problem & Root Causes Resolved**:
+  1. **Swagger Server Startup Failure (Solution File Target)**: In `src/infrastructure/execution/process_manager.py`, `dotnet run` was called with `--project channel-app.sln`. `dotnet run` does not support solution files directly, causing silent startup failures and unreachable Swagger ports (`5001`).
+  2. **ASP.NET Core Startup Crash (`InvalidOperationException`)**: Agent 3 mapped `/health` endpoints without explicitly adding `builder.Services.AddHealthChecks()`, crashing the web host immediately on boot.
+  3. **Integration Test CS0246 Usings & Program Access**: `channel-app.Tests/IntegrationTests.cs` failed to compile due to missing namespaces (`using ChannelApp;`, `using ChannelApp.Models;`, `using System.Threading.Tasks;`) and inaccessible internal `Program` classes.
+  4. **Executable Code Leakage in TDD**: Agent 1's prompt mandated technical interceptors, causing LLM to emit raw C# classes and code blocks in `docs/TECHNICAL_DESIGN.md` even when users explicitly requested "Do not write code in TDD".
+- **Implementation & Enhancements**:
+  - **Executable CSPROJ Target Resolution (`src/infrastructure/execution/process_manager.py`)**:
+    - Updated `_resolve_launch_details` to filter and strictly target the primary executable web project (`channel-app.csproj`) while excluding solution files and test projects.
+  - **HealthChecks & Program Exposure Enforcement (`src/application/agents/main_coder.py`)**:
+    - Mandated explicit `builder.Services.AddHealthChecks().AddDbContextCheck<AppDbContext>()` registration in `Program.cs`.
+    - Enforced `public partial class Program { }` export for `WebApplicationFactory<Program>` test accessibility.
+  - **Test Namespaces & Usings Hardening (`src/application/agents/main_coder.py`)**:
+    - Mandated complete using directives in `IntegrationTests.cs` (`ChannelApp`, `ChannelApp.Models`, `ChannelApp.DTOs`, `System.Threading.Tasks`), eliminating `CS0246` errors.
+  - **Pure Architectural TDD Specification (`src/application/agents/doc_reviewer.py`)**:
+    - Enforced architectural specification rule instructing Agent 1 to represent patterns, interceptors, and schemas purely through prose, Markdown tables, and interface definitions without raw executable C# classes.
+- **Verification Evidence**:
+  - Unit test suite `tests/unit/test_process_manager.py`: 5 passed in 2.26s.
+  - Coder and Doc Reviewer prompt contracts verified.
+
+---
+
+### [2026-11-20] Step 52: Dynamic Architecture Prompts, Isolated Approval Modals & CS1061 Auto-Repair (Completed)
+- **Problem & Root Causes Resolved**:
+  1. **New Project Race Condition & Chat Wiping**: Submitting a new software requirement triggered `setSelectedProject`, which aggressively called `setMessages([])` while the backend background task was still initializing, rendering "Fresh Workspace Ready" instead of the active conversation.
+  2. **Multi-Card Feedback Opening & Stale "Agent 1" Label**: A single global boolean `showFeedbackModal` controlled all approval cards simultaneously. Clicking "Request Changes" on Agent 3 opened all previous approval cards and displayed hardcoded "Agent 1" text.
+  3. **Rigid Clean Architecture Bias in Agent 3**: Agent 3's prompt and chat announcement strictly enforced "Clean Architecture", causing confusion when users requested N-Tier or Minimal API architectures.
+  4. **C# Test Project CS1061 / CS9202 Failures**: In `channel-app.Tests/UnitTests.cs`, Agent 3 invoked properties like `.Kind` on untyped `object` / `IActionResult`, exhausting self-healing cycles.
+- **Implementation & Enhancements**:
+  - **Preserved Optimistic Chat State (`frontend/app/page.tsx`)**:
+    - Guarded `setMessages([])` in project switch effects so optimistic user messages are retained while `isSubmitting` is true.
+  - **Isolated Per-Card Approval Feedback (`frontend/app/page.tsx`)**:
+    - Added `activeFeedbackApprovalId: string | null` state. Only the explicitly clicked card expands its feedback input.
+    - Added dynamic context-aware labels:
+      - `gateType == "DEVELOPMENT"` -> `Specify required changes for Agent 3 (Main Coding Agent):`
+      - `gateType == "QA_VERIFICATION"` -> `Specify required changes for Agent 4 (QA Engineer):`
+      - `gateType == "SPECIFICATION"` -> `Specify required changes for Agent 1 (Documentation Reviewer):`
+  - **TDD-Driven Architecture Prompt (`src/application/agents/main_coder.py`)**:
+    - Removed rigid Clean Architecture enforcement. Agent 3 now strictly reads Section 1 of `docs/TECHNICAL_DESIGN.md` and implements the exact pattern prescribed (N-Tier, Clean Architecture, Vertical Slice, MVC).
+    - Neutralized chat announcement: `"Starting application implementation, synthesizing directory structure from architectural specifications, and building components..."`
+  - **CS1061 / CS9202 Self-Healing Directives (`src/application/agents/main_coder.py`)**:
+    - Added compiler fix rules to self-healing prompt targeting explicit DTO casting, avoiding untyped `.Kind` calls on `object`, and preventing ref structs across async await boundaries.
+- **Verification Evidence**:
+  - TypeScript build check (`npx tsc --noEmit`): PASSED with 0 errors.
+  - Coder prompt and orchestrator updates validated.
+
+---
+
+### [2026-11-20] Step 51: QA Dynamic Payloads, Live Server Keep-Alive & Verifiable Security Evidence (Completed)
+- **Problem & Root Causes Resolved**:
+  1. **QA False-Negative 409 Conflict Loops**: Agent 4 executed tests with static fixture data (`john.doe@example.com`). Subsequent runs on persistent SQLite databases returned valid HTTP 409 Conflict responses, which QA misclassified as code defects, triggering wasted remediation loops.
+  2. **Premature Test Server Shutdown ("Failed to Fetch" on Swagger)**: In `src/application/agents/qa_engineer.py`, the `finally` block immediately killed the live channel app process, preventing users from opening or interacting with Swagger UI.
+  3. **Opaque Security Review Output**: Agent 5 generated only a high-level summary string without verifiable AST/regex proof or code line references, leaving users unable to confirm what code lines were actually inspected.
+  4. **Release Gate Re-looping Glitch**: Approving the `SECURITY_AUDIT` gate triggered graph re-entry through QA/Security nodes instead of terminating at `release_approval_gate` / `END`.
+- **Implementation & Enhancements**:
+  - **QA Dynamic Test Payloads (`src/application/agents/qa_engineer.py`)**:
+    - Injected dynamic UUID/timestamp randomizers (`_randomize_payload`) for unique fields (e.g. emails) on live HTTP test cases.
+    - Updated `finally` block to keep the test server running for user and Swagger inspection.
+  - **Live Server & Interactive Swagger Links (`src/application/orchestration/orchestrator_service.py`)**:
+    - Added interactive markdown cards to Agent 4 QA test reports:
+      - `🌐 Live Test Server Active: http://localhost:{live_port}`
+      - `📄 Interactive Swagger Documentation: http://localhost:{live_port}/swagger`
+    - Populated `liveServerUrl` and `swaggerUrl` in chat metadata.
+  - **Verifiable Security Audit Evidence (`src/application/agents/security_reviewer.py` & `orchestrator_service.py`)**:
+    - Updated Agent 5 system prompt and structured JSON response schema to return `evaluated_checks` with `category`, `cwe`, `file_path`, `line_number`, `scanned_snippet`, `status`, and `assertion`.
+    - Formatted Markdown evidence table: `🔍 Verifiable AST / Code Analysis Evidence` detailing exact inspected files, lines, snippets, and proof assertions.
+  - **Graph Router Termination Fix (`src/infrastructure/orchestration/graph_builder.py`)**:
+    - Refactored `route_entry` to bypass earlier stages and proceed directly to `release_approval_gate` when `security_approved` is true or `current_phase == "RELEASE"`.
+  - **Frontend Right Panel Security Tab (`frontend/app/page.tsx`)**:
+    - Built interactive audit matrix displaying inspected checkpoints, target files, code snippets, and verification assertions.
+- **Verification Evidence**:
+  - FastAPI backend running smoothly on `http://0.0.0.0:8081` with live reload.
+  - Next.js frontend running cleanly on `http://localhost:8080`.
+  - Live HTTP endpoints and security evidence rendering verified.
+
+---
+
 ### [2026-11-19] Step 13: Live Telemetry Aggregation, Dual-Duration Resolution & Observability Portal Fix (Completed)
 - **Problem & Root Cause Resolved**:
   - The user observed that the portal displayed (0) across telemetry tabs when viewing project SRS2, and that duration was reported as 16 secs on messages when Agent 3 (Main Coder) and Agent 4 (QA) actually spent 3-4 minutes compiling, restoring packages, and executing tests.
@@ -1658,13 +1735,16 @@ elease_node to check genuine build and QA outcomes, marking workflow status as F
   - Fixed run status synchronization in `frontend/app/page.tsx` unlocking `isWorkflowRunning` when run status is not active `RUNNING`.
 - **Verification**: `npx tsc --noEmit` verified with 0 errors. Dev server recompiled in 46ms.
 
-### [2026-11-20] Step 50.4: SSE Stream Isolation & Real-Time Header Telemetry Sync (Completed)
-- **Problem**: Stale SSE streams and approval cards leaked into newly created projects; top navigation header token count stayed at `0 toks` when agents executed.
-- **Changes Implemented**:
-  - Created `activeEventSourceRef` tracking and force-closing active streams upon project creation or switching.
-  - Reset `isWorkflowRunning`, `streamStatus`, `currentRunId`, and `activeApprovalId` on project change to ensure clean state.
-  - Bound `fetchAnalyticsOverview` to `messages.length` and added it to the background auto-sync loop, ensuring token counts update in real time.
-- **Verification**: `npx tsc --noEmit` verified with 0 errors. Dev server hot reloaded in 54ms.
+### [2026-11-20] Step 51: Universal Provider-Agnostic LLM Engine (Completed)
+- **Objective**: Decoupled LLM provider execution so non-technical users and engineers can configure Anthropic Claude, OpenAI, DeepSeek, or custom private model endpoints strictly via `.env` and `config/llm_config.json` without any Python code modifications.
+- **Implemented Changes**:
+  - `src/domain/enums.py`: Extended `LLMProvider` with `ANTHROPIC = "anthropic"`, `OPENAI = "openai"`, `DEEPSEEK = "deepseek"`, and `CUSTOM = "custom"`.
+  - `src/infrastructure/config.py`: Added support for `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `CUSTOM_LLM_API_KEY`, and `CUSTOM_LLM_API_BASE`.
+  - `src/infrastructure/llm/litellm_adapter.py`: Removed hardcoded provider restrictions; added dynamic API key resolution and `api_base` pass-through for custom/local endpoints.
+  - `src/infrastructure/llm/provider_resolver.py`: Universal routing of all cloud/custom providers to LiteLLM gateway.
+  - `config/llm_config.json`: Added `anthropic` and `openai` sections with models and pricing.
+- **Verification**: `tests/unit/test_provider_agnostic.py` passed provider enum resolution, model identifier formatting, and API key extraction.
+
 
 
 
