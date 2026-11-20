@@ -1618,18 +1618,53 @@ elease_node to check genuine build and QA outcomes, marking workflow status as F
   - Live probe `GET http://localhost:8081/api/v1/projects` $\rightarrow$ `200 OK` (retrieved 4 seeded projects with active status and branch indicators).
   - Interactive API docs available at `http://localhost:8081/docs`.
 
-### [2026-11-17] Step 45: Node.js Runtime Provisioning, Frontend Dependency Setup & Dev Server Launch (Completed)
-- **Problem**:
-  - Windows host environment lacked Node.js runtime and Next.js frontend dependencies were uninstalled in this branch.
+### [2026-11-20] Step 46: Multi-Turn Conversation History Extractor (Completed)
+- Implemented `fetch_conversation_history()` in `src/application/orchestration/history_helper.py`.
+- Formats persistent messages as `LLMMessage(role="user" | "assistant")` while filtering transient cards.
+- Verified with 4 unit tests in `tests/unit/test_history_helper.py`.
+
+### [2026-11-20] Step 47: Cumulative Prompting & In-Place Document Diffing in Agent 1 (Completed)
+- Enforced original requirements preservation and cumulative refinement prompting in `src/application/agents/doc_reviewer.py`.
+- Verified with 3 unit tests in `tests/unit/test_doc_reviewer_revision.py`.
+
+### [2026-11-20] Step 48: Phase-Aware Rejection Routing in Orchestrator (Completed)
+- Eliminated blanket spec invalidation in `src/application/orchestration/orchestrator_service.py`.
+- Added specific revision flags (`is_qa_revision`, `is_dev_revision`, etc.) and fast-path rerunning.
+- Verified with 3 unit tests in `tests/unit/test_approval_routing.py`.
+
+### [2026-11-20] Step 49: Offline Suite Stabilization & Live Server Diagnostics (Completed)
+- Added `tests/conftest.py` setting `LITELLM_LOCAL_MODEL_COST_MAP=True`. Verified 75 regression tests.
+- Launched FastAPI backend (8081) and Next.js frontend (8080).
+- Fixed dev-mode hydration mismatch warnings via `suppressHydrationWarning`.
+
+### [2026-11-20] Step 50.1: Project Deletion Implementation (Completed)
+- **Problem**: Users could not delete projects directly from the sidebar.
+- **Backend**: Implemented `DELETE /api/v1/projects/{project_id}` in `src/api/routes/projects.py` with DB cascade delete and workspace cleanup.
+- **Frontend**: Added `deleteProject` in `frontend/lib/api.ts` and Trash icon (`Trash2`) on sidebar project cards with confirmation and automatic fallback selection in `frontend/app/page.tsx`.
+- **Verification**: `tests/integration/test_api_projects.py::test_delete_project_success_and_cascade` PASSED [100%]. Frontend `npx tsc --noEmit` passed with 0 errors.
+
+### [2026-11-20] Step 50.2: UI Visual Fixes (Checklist Icons, Markdown Bold, Header Cleanup) (Completed)
+- **Checklist Icons**: Updated checklist evaluation logic so `"0 errors"`, `"0 error"`, `"0 failed"`, and `"auto-repaired"` cleanly render as green checkmarks (`CheckCircle2`) instead of false-negative red crosses.
+- **Markdown Bold & Code Formatting**: Implemented `FormattedMessageText` helper component in `frontend/app/page.tsx` converting `**bold**` into `<strong>` and `` `code` `` into styled monospace badges instead of displaying raw asterisks.
+- **Header Cleanup**: Removed redundant 5 agent toggle pills (`Agent 1 ON`, `Agent 2 OFF`, etc.) from the top navigation bar.
+- **Verification**: `npx tsc --noEmit` executed cleanly with 0 errors.
+
+### [2026-11-20] Step 50.3: Input Keyboard Handling (Enter to Send & Shift+Enter Newline) (Completed)
+- **Problem**: Pressing `Shift+Enter` did not smoothly insert newlines and auto-expand textarea height; pressing `Enter` failed to send when `isWorkflowRunning` stayed locked at `WAITING_FOR_APPROVAL` / `IDLE`, and Request Changes input had no `Enter` listener.
 - **Changes Implemented**:
-  - Installed Node.js LTS (v26.13.1, npm 11.20.0) via `winget`.
-  - Upgraded Next.js from 16.4.3 to 16.4.6 with `experimental.agentUpgrade = "security"` resolving security advisory.
-  - Installed 360 frontend packages in `frontend/`.
-  - Configured `frontend/.env.local` (`NEXT_PUBLIC_API_URL=http://localhost:8081`).
-  - Launched Next.js Turbopack dev server daemon on port 8080.
-- **Verification**:
-  - Live probe `GET http://localhost:8080` $\rightarrow$ `HTTP/1.1 200 OK` (served HTML with `X-Powered-By: Next.js`).
-  - Both Backend (8081) and Frontend (8080) are simultaneously live and operational.
+  - Implemented responsive height expansion on `Shift+Enter` in chatbox textarea.
+  - Bound `Enter` key without Shift to `handleSendMessage()`.
+  - Added `onKeyDown` to Request Changes input submitting via `handleRequestChanges()`.
+  - Fixed run status synchronization in `frontend/app/page.tsx` unlocking `isWorkflowRunning` when run status is not active `RUNNING`.
+- **Verification**: `npx tsc --noEmit` verified with 0 errors. Dev server recompiled in 46ms.
+
+### [2026-11-20] Step 50.4: SSE Stream Isolation & Real-Time Header Telemetry Sync (Completed)
+- **Problem**: Stale SSE streams and approval cards leaked into newly created projects; top navigation header token count stayed at `0 toks` when agents executed.
+- **Changes Implemented**:
+  - Created `activeEventSourceRef` tracking and force-closing active streams upon project creation or switching.
+  - Reset `isWorkflowRunning`, `streamStatus`, `currentRunId`, and `activeApprovalId` on project change to ensure clean state.
+  - Bound `fetchAnalyticsOverview` to `messages.length` and added it to the background auto-sync loop, ensuring token counts update in real time.
+- **Verification**: `npx tsc --noEmit` verified with 0 errors. Dev server hot reloaded in 54ms.
 
 
 

@@ -3,12 +3,13 @@ from src.infrastructure.orchestration.approval_engine import ApprovalEngine
 from pathlib import Path
 
 import io
-
+import logging
 import os
-
+import shutil
 import zipfile
-
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -235,6 +236,27 @@ def create_project(req: CreateProjectRequest, db: Session = Depends(get_db)):
         git_remote_url=project.git_remote_url,
         current_branch=None,
     )
+
+
+@router.delete("/{project_id}", status_code=status.HTTP_200_OK)
+def delete_project(project_id: uuid.UUID, db: Session = Depends(get_db)):
+    project = db.query(ProjectORM).filter_by(id=project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        git_service = GitService(db=db)
+        repo_dir = Path(git_service.get_repository_path(project.id, RepositoryType.CHANNEL_APP))
+        ws_dir = repo_dir.parent if repo_dir.name in ("channel-app", "mock-vendor-api") else repo_dir
+        if ws_dir.exists() and ws_dir.is_dir():
+            shutil.rmtree(ws_dir, ignore_errors=True)
+    except Exception as e:
+        logger.warning(f"Could not delete workspace directory for project {project_id}: {e}")
+
+    db.delete(project)
+    db.commit()
+
+    return {"status": "DELETED", "project_id": str(project_id)}
 
 
 @router.get("/{project_id}/branches")

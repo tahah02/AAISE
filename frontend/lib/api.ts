@@ -70,6 +70,17 @@ export async function fetchProjects(): Promise<ProjectItem[]> {
   }
 }
 
+export async function deleteProject(projectId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/api/v1/projects/${projectId}`, {
+      method: "DELETE",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchProjectArtifacts(projectId: string): Promise<ArtifactItem[]> {
   try {
     const res = await fetch(`${API_BASE}/api/v1/workflow/${projectId}/artifacts`);

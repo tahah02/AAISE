@@ -69,11 +69,13 @@ import {
   Zap,
   Clock,
   Activity,
+  Trash2,
 } from "lucide-react";
 
 import {
 
   fetchProjects,
+  deleteProject,
 
   fetchProjectArtifacts,
 
@@ -192,7 +194,64 @@ interface ChatMessage {
   };
 }
 
+function FormattedMessageText({ text }: { text: string }) {
+  const lines = text.split("\n");
 
+  const parseLine = (line: string) => {
+    const parts = line.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+    return parts.map((part, i) => {
+      if (part.startsWith("**") && part.endsWith("**") && part.length >= 4) {
+        return (
+          <strong key={i} className="font-semibold text-white">
+            {part.slice(2, -2)}
+          </strong>
+        );
+      }
+      if (part.startsWith("`") && part.endsWith("`") && part.length >= 2) {
+        return (
+          <code key={i} className="bg-slate-800/90 text-cyan-300 px-1 py-0.5 rounded text-[11.5px] font-mono border border-slate-700/60">
+            {part.slice(1, -1)}
+          </code>
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+
+  return (
+    <div className="space-y-1 text-slate-200 leading-relaxed text-[13px] break-words">
+      {lines.map((line, idx) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return <div key={idx} className="h-1.5" />;
+        }
+        if (trimmed.startsWith("### ")) {
+          return (
+            <h4 key={idx} className="font-bold text-white text-[13.5px] mt-2 mb-1">
+              {parseLine(trimmed.slice(4))}
+            </h4>
+          );
+        }
+        if (trimmed.startsWith("## ")) {
+          return (
+            <h3 key={idx} className="font-bold text-white text-[14px] mt-2.5 mb-1">
+              {parseLine(trimmed.slice(3))}
+            </h3>
+          );
+        }
+        if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+          return (
+            <div key={idx} className="flex items-start gap-1.5 ml-1">
+              <span className="text-slate-500 select-none">•</span>
+              <div className="flex-1">{parseLine(trimmed.slice(2))}</div>
+            </div>
+          );
+        }
+        return <div key={idx}>{parseLine(line)}</div>;
+      })}
+    </div>
+  );
+}
 
 export default function WorkspacePage() {
 
@@ -287,6 +346,7 @@ export default function WorkspacePage() {
 
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const activeEventSourceRef = useRef<EventSource | null>(null);
 
 
 
@@ -347,13 +407,14 @@ export default function WorkspacePage() {
   }, [selectedProject?.id]);
 
   useEffect(() => {
-    fetchAnalyticsOverview(selectedProject?.id).then((ov) => {
+    if (!selectedProject?.id) return;
+    fetchAnalyticsOverview(selectedProject.id).then((ov) => {
       if (ov) setQuickTelemetry(ov);
     });
-    fetchAnalyticsQAReports(selectedProject?.id).then((qa) => {
+    fetchAnalyticsQAReports(selectedProject.id).then((qa) => {
       if (qa?.test_runs) setLiveQaRuns(qa.test_runs);
     });
-  }, [selectedProject?.id, activeTab]);
+  }, [selectedProject?.id, activeTab, messages.length]);
 
   const handleRunProject = async () => {
     if (!selectedProject?.id || isStartingRun) return;
@@ -428,6 +489,20 @@ export default function WorkspacePage() {
     }
   }, [selectedProject?.id]);
 
+  const handleDeleteProject = async (projectId: string, projectName: string) => {
+    if (!window.confirm(`Are you sure you want to delete project "${projectName}"?`)) return;
+    const ok = await deleteProject(projectId);
+    if (ok) {
+      const remaining = projects.filter((p) => p.id !== projectId);
+      setProjects(remaining);
+      if (selectedProject?.id === projectId) {
+        setSelectedProject(remaining.length > 0 ? remaining[0] : null);
+        setMessages([]);
+        setArtifacts([]);
+      }
+    }
+  };
+
   // Auto-scroll to bottom of chat
   useEffect(() => {
     if (messages.length > 0) {
@@ -444,11 +519,16 @@ export default function WorkspacePage() {
     let isMounted = true;
 
     // Reset local project state immediately to prevent stale project leakage
+    if (activeEventSourceRef.current) {
+      activeEventSourceRef.current.close();
+      activeEventSourceRef.current = null;
+    }
     setMessages([]);
     setArtifacts([]);
     setCodeDiff("");
     setCurrentRunId(null);
     setActiveApprovalId(null);
+    setIsWorkflowRunning(false);
     setStreamStatus("ready");
 
     fetchProjectArtifacts(selectedProject.id).then((arts) => {
@@ -510,6 +590,9 @@ export default function WorkspacePage() {
     if (!selectedProject?.id) return;
 
     const interval = setInterval(() => {
+      fetchAnalyticsOverview(selectedProject.id).then((ov) => {
+        if (ov) setQuickTelemetry(ov);
+      });
       fetchProjectMessages(selectedProject.id).then((data) => {
         if (data) {
           if (data.run_id) {
@@ -518,7 +601,7 @@ export default function WorkspacePage() {
           if (data.run_status === "RUNNING") {
             setIsWorkflowRunning(true);
             setStreamStatus((prev) => (prev === "idle" || prev === "ready" ? "running" : prev));
-          } else if (data.run_status === "COMPLETED" || data.run_status === "FAILED" || data.run_status === "CANCELLED") {
+          } else {
             setIsWorkflowRunning(false);
             setStreamStatus((prev) => (prev === "running" || prev === "streaming" ? "ready" : prev));
           }
@@ -554,13 +637,14 @@ export default function WorkspacePage() {
   // SSE Stream Listener
 
   useEffect(() => {
-
     if (!currentRunId) return;
 
-
+    if (activeEventSourceRef.current) {
+      activeEventSourceRef.current.close();
+      activeEventSourceRef.current = null;
+    }
 
     const es = subscribeToWorkflowStream(
-
       currentRunId,
 
       (eventData) => {
@@ -632,15 +716,13 @@ export default function WorkspacePage() {
 
     );
 
-
+    activeEventSourceRef.current = es;
 
     return () => {
-
       es.close();
-
+      activeEventSourceRef.current = null;
     };
-
-  }, [currentRunId, selectedProject]);
+  }, [currentRunId, selectedProject?.id]);
 
 
 
@@ -1334,6 +1416,12 @@ export default function WorkspacePage() {
                       if (name) {
                         try {
                         const p = await createProject(name, undefined, undefined, undefined, agentToggles);
+                        if (activeEventSourceRef.current) {
+                          activeEventSourceRef.current.close();
+                          activeEventSourceRef.current = null;
+                        }
+                        setIsWorkflowRunning(false);
+                        setStreamStatus("ready");
                         setProjects((prev) => [p, ...prev]);
                         setSelectedProject(p);
                         setMessages([]);
@@ -1379,78 +1467,11 @@ export default function WorkspacePage() {
 
 
 
-          {/* Dynamic Agent Toggles in Header */}
+          {/* Header Actions */}
 
           <div className="flex items-center gap-3">
 
             <div className="flex items-center gap-1.5 flex-wrap">
-
-              <button
-                onClick={() => handleToggleAgent("agent1")}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
-                  agentToggles.agent1
-                    ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300"
-                    : "bg-slate-900 border-slate-700 text-slate-500 line-through"
-                }`}
-                title="Agent 1: Documentation Reviewer"
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent1 ? "bg-emerald-400" : "bg-slate-600"}`} />
-                Agent 1 {agentToggles.agent1 ? "ON" : "OFF"}
-              </button>
-
-              <button
-                onClick={() => handleToggleAgent("agent2")}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
-                  agentToggles.agent2
-                    ? "bg-cyan-950/60 border-cyan-500/40 text-cyan-300"
-                    : "bg-slate-900 border-slate-700 text-slate-500 line-through"
-                }`}
-                title="Agent 2: Mock Vendor API Developer"
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent2 ? "bg-cyan-400" : "bg-slate-600"}`} />
-                Agent 2 {agentToggles.agent2 ? "ON" : "OFF"}
-              </button>
-
-              <button
-                onClick={() => handleToggleAgent("agent3")}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
-                  agentToggles.agent3
-                    ? "bg-blue-950/60 border-blue-500/40 text-blue-300"
-                    : "bg-slate-900 border-slate-700 text-slate-500 line-through"
-                }`}
-                title="Agent 3: Main Coding Agent"
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent3 ? "bg-blue-400" : "bg-slate-600"}`} />
-                Agent 3 {agentToggles.agent3 ? "ON" : "OFF"}
-              </button>
-
-              <button
-                onClick={() => handleToggleAgent("agent4")}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
-                  agentToggles.agent4
-                    ? "bg-purple-950/60 border-purple-500/40 text-purple-300"
-                    : "bg-slate-900 border-slate-700 text-slate-500 line-through"
-                }`}
-                title="Agent 4: Independent QA Engineer"
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent4 ? "bg-purple-400" : "bg-slate-600"}`} />
-                Agent 4 {agentToggles.agent4 ? "ON" : "OFF"}
-              </button>
-
-              <button
-                onClick={() => handleToggleAgent("agent5")}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border transition ${
-                  agentToggles.agent5
-                    ? "bg-amber-950/60 border-amber-500/40 text-amber-300"
-                    : "bg-slate-900 border-slate-700 text-slate-500 line-through"
-                }`}
-                title="Agent 5: Security Reviewer"
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${agentToggles.agent5 ? "bg-amber-400" : "bg-slate-600"}`} />
-                Agent 5 {agentToggles.agent5 ? "ON" : "OFF"}
-              </button>
-
-
 
               <button
                 onClick={() => setShowConfigModal(true)}
@@ -1595,6 +1616,12 @@ export default function WorkspacePage() {
                     if (name) {
                       try {
                         const p = await createProject(name, undefined, undefined, undefined, agentToggles);
+                        if (activeEventSourceRef.current) {
+                          activeEventSourceRef.current.close();
+                          activeEventSourceRef.current = null;
+                        }
+                        setIsWorkflowRunning(false);
+                        setStreamStatus("ready");
                         setProjects((prev) => [p, ...prev]);
                         setSelectedProject(p);
                         setMessages([]);
@@ -1644,7 +1671,7 @@ export default function WorkspacePage() {
 
                       onClick={() => setSelectedProject(p)}
 
-                      className={`p-2 rounded-lg cursor-pointer transition ${
+                      className={`group p-2 rounded-lg cursor-pointer transition flex items-center justify-between ${
 
                         selectedProject?.id === p.id
 
@@ -1656,7 +1683,7 @@ export default function WorkspacePage() {
 
                     >
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
 
                         <div className="h-6 w-6 rounded bg-blue-500/20 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
 
@@ -1673,6 +1700,18 @@ export default function WorkspacePage() {
                         </div>
 
                       </div>
+
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteProject(p.id, p.name);
+                        }}
+                        title={`Delete project ${p.name}`}
+                        className="opacity-0 group-hover:opacity-100 hover:text-rose-400 text-slate-500 p-1 rounded hover:bg-slate-800/80 transition shrink-0 ml-1"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
 
                     </div>
 
@@ -2059,7 +2098,7 @@ export default function WorkspacePage() {
                               </div>
                             </div>
                           ) : (
-                            <p className="text-slate-200 leading-relaxed text-[13px] whitespace-pre-wrap break-words">{m.text}</p>
+                            <FormattedMessageText text={m.text} />
                           )
                         )}
 
@@ -2069,8 +2108,10 @@ export default function WorkspacePage() {
                           <div className="mt-3 space-y-1.5 text-[11.5px] text-slate-300">
                             {m.checklist.map((item, idx) => {
                               const itemLower = item.toLowerCase();
-                              const isFailure = itemLower.includes("failed") || itemLower.includes("error");
-                              const isWarning = itemLower.includes("warning") || itemLower.includes("repaired") || itemLower.includes("remed");
+                              const isZeroErrors = itemLower.includes("0 error") || itemLower.includes("0 errors") || itemLower.includes("0 failed");
+                              const isRepaired = itemLower.includes("repaired") || itemLower.includes("remed");
+                              const isFailure = !isZeroErrors && (itemLower.includes("failed") || (itemLower.includes("error") && !isRepaired));
+                              const isWarning = itemLower.includes("warning");
                               return (
                                 <div
                                   key={idx}
@@ -2385,17 +2426,17 @@ export default function WorkspacePage() {
                               <span className="text-[11px] font-semibold text-amber-300">Specify required changes for Agent 1:</span>
 
                               <input
-
                                 type="text"
-
                                 value={feedbackInput}
-
                                 onChange={(e) => setFeedbackInput(e.target.value)}
-
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    handleRequestChanges();
+                                  }
+                                }}
                                 placeholder="e.g., Add Redis caching to token validation and rate limiting..."
-
                                 className="w-full bg-[#080b12] border border-slate-700 rounded px-2.5 py-1.5 text-[12px] text-slate-200 focus:outline-none focus:border-amber-500"
-
                               />
 
                               <div className="flex items-center gap-2 justify-end">
@@ -2528,11 +2569,9 @@ export default function WorkspacePage() {
 
 
               <form
-
+                suppressHydrationWarning
                 onSubmit={handleSendMessage}
-
                 className="border border-slate-800 focus-within:border-cyan-500/60 rounded-xl bg-[#101420] p-2 transition"
-
               >
 
                 <textarea
@@ -2544,9 +2583,18 @@ export default function WorkspacePage() {
                     e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage();
+                    if (e.key === "Enter") {
+                      if (e.shiftKey) {
+                        setTimeout(() => {
+                          if (chatInputRef.current) {
+                            chatInputRef.current.style.height = "auto";
+                            chatInputRef.current.style.height = `${Math.min(chatInputRef.current.scrollHeight, 180)}px`;
+                          }
+                        }, 0);
+                      } else {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
                     }
                   }}
                   rows={1}
@@ -2555,7 +2603,7 @@ export default function WorkspacePage() {
                       ? "Add notes or prompt for the attached document..."
                       : "Describe your software project, or say 'Hi'..."
                   }
-                  disabled={isSubmitting || isWorkflowRunning}
+                  disabled={isSubmitting}
                   className="w-full bg-transparent text-[13px] text-slate-200 placeholder:text-slate-600 focus:outline-none px-2 py-1 disabled:opacity-50 resize-none min-h-[32px] max-h-44 overflow-y-auto leading-relaxed"
                 />
 

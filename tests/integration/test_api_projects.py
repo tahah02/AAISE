@@ -77,3 +77,20 @@ def test_get_nonexistent_project_returns_404(in_memory_client):
     resp = client.get(f"/api/v1/projects/{fake_id}/agents")
     assert resp.status_code == 404
 
+
+def test_delete_project_success_and_cascade(in_memory_client):
+    client, proj_id = in_memory_client
+
+    del_resp = client.delete(f"/api/v1/projects/{proj_id}")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["status"] == "DELETED"
+    assert del_resp.json()["project_id"] == str(proj_id)
+
+    # Subsequent GET returns 404
+    get_resp = client.get(f"/api/v1/projects/{proj_id}/agents")
+    assert get_resp.status_code == 404
+
+    # Deleting again returns 404
+    del_again = client.delete(f"/api/v1/projects/{proj_id}")
+    assert del_again.status_code == 404
+
